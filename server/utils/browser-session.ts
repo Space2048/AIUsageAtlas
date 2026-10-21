@@ -93,6 +93,29 @@ async function createSession(providerId: string, dataDir: string, consoleUrl: st
   return session
 }
 
+// 登录窗口用本机安装的 Chrome（界面/字体/习惯与用户日常一致），未安装时回退内置 Chromium。
+// 仍是独立持久化 profile（.data/browser-profiles/<渠道>）：不是无痕，也不碰主 Chrome 配置，
+// 登录一次后由快照与保活复用
+export async function launchLoginWindow(pw: typeof import('playwright'), dataDir: string, providerId: string) {
+  const dir = ensureProfileDir(dataDir, providerId)
+  // AutomationControlled 会让 navigator.webdriver 暴露为 true，Google 登录风控会直接
+  // 跳 signin/rejected「此浏览器或应用可能不安全」（2026-10-21 对照实测），必须关掉
+  const base = {
+    headless: false,
+    viewport: null,
+    args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
+  }
+  try {
+    return await pw.chromium.launchPersistentContext(dir, { ...base, channel: 'chrome' })
+  } catch (e) {
+    // 失败原因必须留痕（此前被静默吞掉，连环 500 只能靠猜）；
+    // 稍等再回退，让上一次失败尝试的 Chromium 先释放 profile 锁（连点/并发时会撞）
+    console.warn(`[login] 本机 Chrome 启动失败，回退内置 Chromium：${(e as Error).message.split('\n')[0]}`)
+    await new Promise((r) => setTimeout(r, 600))
+    return await pw.chromium.launchPersistentContext(dir, base)
+  }
+}
+
 // 取得（并首次加载）保活页面；已加载过的页面绝不重复导航
 export async function ensureLivePage(providerId: string, dataDir: string, consoleUrl: string): Promise<Page> {
   let session = sessions.get(providerId)

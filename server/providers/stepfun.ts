@@ -1,12 +1,7 @@
 import { fetchJson } from '~~/server/utils/http'
 import { normalizeCookie } from '~~/server/utils/cookie'
-import {
-  ensureProfileDir,
-  isLoggedIn,
-  jwtExpMs,
-  markLoggedIn,
-} from '~~/server/utils/browser-profile'
-import { closeSession, ensureLivePage, isPageAlive, persistStorageState, snapshotSession, startKeepAlive } from '~~/server/utils/browser-session'
+import { isLoggedIn, jwtExpMs, markLoggedIn } from '~~/server/utils/browser-profile'
+import { closeSession, ensureLivePage, isPageAlive, launchLoginWindow, persistStorageState, snapshotSession, startKeepAlive } from '~~/server/utils/browser-session'
 import { PluginError, type CredentialPayload, type PluginContext, type PluginFetchResult, type PluginLoginResult, type ProviderPlugin } from './types'
 
 /**
@@ -53,6 +48,19 @@ async function fetchAccountViaApi(apiKey: string, base: string): Promise<StepFun
   return fetchJson<StepFunAccount>(`${base}/v1/accounts`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   })
+}
+
+// 模型列表只在 API Key 模式下可取；返回 undefined 时执行器保留库里上一次的列表
+async function fetchModelsViaApi(apiKey: string, base: string): Promise<string[] | undefined> {
+  try {
+    const res = await fetchJson<{ data?: Array<{ id?: string }> }>(`${base}/v1/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+    const ids = (res.data ?? []).map((m) => m.id).filter((x): x is string => !!x)
+    return ids.length ? ids : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // ---------- 页面内 RPC（复用前端自身的鉴权机制） ----------
@@ -241,25 +249,30 @@ function buildSnapshot(
     })
   }
 
-  const byDay = new Map<string, { input: number; output: number; cached: number; requests: number; cost: number }>()
-  const byModelDay = new Map<string, { date: string; modelId: string; input: number; output: number; cached: number; requests: number; cost: number }>()
+  // 订阅（Step Plan Credits）与按量（OpenAPI 计费）是两条独立数据流：
+  // 日维度按 billing 分行（usage_daily 主键含 plan_name，按量行挂独立计划名才能与订阅行并存）；
+  // 模型维度主键无计划列，同日同模型两流合并，混合行不标平面
+  type Billing = 'subscription' | 'payg'
+  const byDay = new Map<string, { date: string; billing: Billing; input: number; output: number; cached: number; requests: number; cost: number }>()
+  const byModelDay = new Map<string, { date: string; modelId: string; input: number; output: number; cached: number; requests: number; billing?: Billing }>()
 
-  const add = (day: string, modelId: string, input: number, output: number, cached: number, calls: number, cost: number) => {
-    const d = byDay.get(day) ?? { input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
+  const add = (day: string, modelId: string, input: number, output: number, cached: number, calls: number, cost: number, billing: Billing) => {
+    const dkey = `${day}|${billing}`
+    const d = byDay.get(dkey) ?? { date: day, billing, input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
     d.input += input
     d.output += output
     d.cached += cached
     d.requests += calls
     d.cost += cost
-    byDay.set(day, d)
+    byDay.set(dkey, d)
 
     const key = `${day}|${modelId}`
-    const m = byModelDay.get(key) ?? { date: day, modelId, input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
+    const m = byModelDay.get(key) ?? { date: day, modelId, input: 0, output: 0, cached: 0, requests: 0, billing }
     m.input += input
     m.output += output
     m.cached += cached
     m.requests += calls
-    m.cost += cost
+    if (m.billing !== billing) m.billing = undefined
     byModelDay.set(key, m)
   }
 
@@ -274,7 +287,8 @@ function buildSnapshot(
       num(r.out_amount) ?? 0,
       num(r.cache_amount) ?? 0,
       num(r.calls) ?? 0,
-      0
+      0,
+      'subscription'
     )
   }
   for (const r of openapiRecords) {
@@ -287,20 +301,23 @@ function buildSnapshot(
       num(r.outAmount) ?? 0,
       num(r.cacheAmount) ?? 0,
       1,
-      (num(r.totalCost) ?? num(r.cost) ?? 0) / 100
+      (num(r.totalCost) ?? num(r.cost) ?? 0) / 100,
+      'payg'
     )
   }
 
-  const usageDaily = [...byDay.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, v]) => ({
-      date,
+  const usageDaily = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date) || a.billing.localeCompare(b.billing))
+    .map((v) => ({
+      date: v.date,
       inputTokens: v.input,
       outputTokens: v.output,
       cachedTokens: v.cached,
       requests: v.requests,
       costAmount: Number(v.cost.toFixed(4)),
       currency: 'CNY',
+      planName: v.billing === 'subscription' ? planName : '按量付费',
+      billing: v.billing,
     }))
 
   // 按「日 + 模型」输出真实单日明细：此前按模型累计后再盖上最后一个日期，
@@ -314,6 +331,7 @@ function buildSnapshot(
       outputTokens: v.output,
       cachedTokens: v.cached,
       requests: v.requests,
+      billing: v.billing,
     }))
 
   // 窗口报告「未消耗」但查询区间内有真实 token 时，两个口径矛盾，明确写进 notes，
@@ -348,6 +366,8 @@ function buildSnapshot(
     balance,
     windows,
     usageDaily,
+    // 采集区间为近 90 天（fetch 侧 fromSec）：整体快照替换，防止改挂计划名后旧行残留双倍计数
+    usageWindow: { from: tsToDate(nowSec - 90 * 86400), to: tsToDate(nowSec) },
     modelUsage,
     notes: [
       ...notes,
@@ -618,16 +638,12 @@ export const stepfunPlugin: ProviderPlugin = {
   // 交互式登录：弹出真实浏览器，用户登录一次，会话持久化在 profile 目录
   async login(ctx: PluginContext): Promise<PluginLoginResult> {
     const pw = await importPlaywright(ctx)
-    const dir = ensureProfileDir(ctx.dataDir, ctx.providerId)
 
     // 先释放无头保活实例占用的 profile，否则两个 Chromium 会互相冲掉 Cookie
     await closeSession(ctx.providerId).catch(() => {})
 
-    const context = await pw.chromium.launchPersistentContext(dir, {
-      headless: false,
-      viewport: null,
-      args: ['--start-maximized'],
-    })
+    // 本机 Chrome 打开（未装则回退内置 Chromium）；独立持久 profile，登录一次后快照+保活复用
+    const context = await launchLoginWindow(pw, ctx.dataDir, ctx.providerId)
 
     try {
       const page = context.pages()[0] ?? (await context.newPage())
@@ -706,6 +722,7 @@ export const stepfunPlugin: ProviderPlugin = {
       if (account.balance === undefined) {
         throw new PluginError('parse', '账户接口响应缺少 balance 字段')
       }
+      const models = await fetchModelsViaApi(cred.apiKey, API_BASE)
       return {
         account: {
           userName: 'API 用户',
@@ -714,9 +731,11 @@ export const stepfunPlugin: ProviderPlugin = {
         },
         balance: { amount: account.balance, currency: 'CNY' },
         plan: { name: account.type === 'postpaid' ? '后付费' : '预付费按量', currency: 'CNY' },
+        availableModels: models,
         notes: [
           `账户类型 ${account.type ?? 'unknown'}`,
           `累计充值 ¥${account.total_cash_balance ?? 0} / 累计赠送 ¥${account.total_voucher_balance ?? 0}`,
+          models ? `可见模型 ${models.length} 个` : '模型列表获取失败，沿用上次结果',
           'Step Plan 套餐额度需要 Cookie 或浏览器登录模式采集',
         ],
       }

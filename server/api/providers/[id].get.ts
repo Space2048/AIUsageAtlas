@@ -16,8 +16,10 @@ export default defineEventHandler((event): ProviderDetail => {
     .get(id) as { user_name: string; masked_contact: string; region: string } | undefined
 
   const plan = db
-    .prepare(`SELECT plan_name, price, currency, renewal_date, auto_renew FROM subscription WHERE provider_id = ?`)
-    .all(id)[0] as { plan_name: string; price: number; currency: string; renewal_date: string | null; auto_renew: number } | undefined
+    .prepare(`SELECT plan_name, price, currency, renewal_date, auto_renew, unknown_fields FROM subscription WHERE provider_id = ?`)
+    .all(id)[0] as
+    | { plan_name: string; price: number | null; currency: string; renewal_date: string | null; auto_renew: number | null; unknown_fields: string | null }
+    | undefined
 
   const balance = db
     .prepare(`SELECT balance, currency FROM balance_snapshot WHERE provider_id = ? ORDER BY date DESC LIMIT 1`)
@@ -41,18 +43,37 @@ export default defineEventHandler((event): ProviderDetail => {
   const usage30d: UsageDay[] = (
     db
       .prepare(
-        `SELECT date, (input_tokens + output_tokens + cached_tokens) AS tokens, cost_amount, cost_currency
-         FROM usage_daily WHERE provider_id = ? ORDER BY date ASC LIMIT 90`
+        `SELECT date,
+                SUM(input_tokens + output_tokens + cached_tokens) AS tokens,
+                SUM(CASE WHEN billing = 'subscription' THEN input_tokens + output_tokens + cached_tokens ELSE 0 END) AS sub_tokens,
+                SUM(CASE WHEN billing = 'payg' THEN input_tokens + output_tokens + cached_tokens ELSE 0 END) AS payg_tokens,
+                SUM(cost_amount) AS cost_amount,
+                MAX(cost_currency) AS cost_currency
+         FROM usage_daily WHERE provider_id = ? GROUP BY date ORDER BY date ASC LIMIT 90`
       )
-      .all(id) as Array<{ date: string; tokens: number; cost_amount: number; cost_currency: string }>
-  ).map((r) => ({ date: r.date, tokens: r.tokens, costAmount: r.cost_amount, currency: r.cost_currency }))
+      .all(id) as Array<{
+        date: string
+        tokens: number
+        sub_tokens: number
+        payg_tokens: number
+        cost_amount: number
+        cost_currency: string
+      }>
+  ).map((r) => ({
+    date: r.date,
+    tokens: r.tokens,
+    costAmount: r.cost_amount,
+    currency: r.cost_currency,
+    subscriptionTokens: r.sub_tokens,
+    paygTokens: r.payg_tokens,
+  }))
 
   const modelRows = db
     .prepare(
-      `SELECT model_id, SUM(input_tokens + output_tokens + cached_tokens) AS tokens, SUM(requests) AS requests
-       FROM usage_model_daily WHERE provider_id = ? GROUP BY model_id ORDER BY tokens DESC`
+      `SELECT model_id, billing, SUM(input_tokens + output_tokens + cached_tokens) AS tokens, SUM(requests) AS requests
+       FROM usage_model_daily WHERE provider_id = ? GROUP BY model_id, billing ORDER BY tokens DESC`
     )
-    .all(id) as Array<{ model_id: string; tokens: number; requests: number }>
+    .all(id) as Array<{ model_id: string; billing: string | null; tokens: number; requests: number }>
   const totalTokens = modelRows.reduce((a, r) => a + r.tokens, 0) || 1
 
   const modelUsage: ModelUsageRow[] = modelRows.map((r) => {
@@ -70,12 +91,23 @@ export default defineEventHandler((event): ProviderDetail => {
       inputPerM: price?.input_per_m ?? null,
       outputPerM: price?.output_per_m ?? null,
       currency: price?.currency ?? null,
+      billing: r.billing === 'subscription' || r.billing === 'payg' ? r.billing : null,
     }
   })
 
+  const availableModels = (
+    db
+      .prepare(`SELECT model_id FROM available_model WHERE provider_id = ? ORDER BY model_id`)
+      .all(id) as Array<{ model_id: string }>
+  ).map((r) => r.model_id)
+
+  // started_at 由 datetime('now') 写入，是无时区标记的 UTC 串；转成带 Z 的 ISO 8601，前端才能按本地时间解析
   const syncLogs: SyncLogRow[] = (
     db
-      .prepare(`SELECT id, started_at, status, duration_ms, error_type, error_msg FROM sync_log WHERE provider_id = ? ORDER BY id DESC LIMIT 5`)
+      .prepare(
+        `SELECT id, COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', started_at), started_at) AS started_at, status, duration_ms, error_type, error_msg
+         FROM sync_log WHERE provider_id = ? ORDER BY id DESC LIMIT 5`
+      )
       .all(id) as Array<Record<string, never>>
   ).map((l) => ({
     id: l.id,
@@ -111,11 +143,13 @@ export default defineEventHandler((event): ProviderDetail => {
       currency: plan?.currency ?? 'CNY',
       renewalDate: plan?.renewal_date ?? null,
       autoRenew: !!plan?.auto_renew,
+      unknownFields: (plan?.unknown_fields ?? '').split(',').filter(Boolean),
     },
     balance: balance ? { amount: balance.balance, currency: balance.currency } : null,
     windows,
     usage30d,
     modelUsage,
+    availableModels,
     syncLogs,
     sync: { enabled: !!sync?.enabled, intervalSec: sync?.interval_sec ?? 3600 },
     authKinds: getPlugin(p.plugin_id)?.authMethods ?? [],

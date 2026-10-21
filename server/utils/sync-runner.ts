@@ -10,11 +10,13 @@ export interface SyncOutcome {
   error?: string
 }
 
-function loadCredential(providerId: string): CredentialPayload | null {
+function loadCredential(providerId: string, kind?: string): CredentialPayload | null {
   const db = getDb()
-  const row = db
-    .prepare(`SELECT kind, payload_enc FROM credential WHERE provider_id = ? ORDER BY updated_at DESC LIMIT 1`)
-    .get(providerId) as { kind: string; payload_enc: string } | undefined
+  const row = (
+    kind
+      ? db.prepare(`SELECT kind, payload_enc FROM credential WHERE provider_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 1`)
+      : db.prepare(`SELECT kind, payload_enc FROM credential WHERE provider_id = ? ORDER BY updated_at DESC LIMIT 1`)
+  ).get(...(kind ? [providerId, kind] : [providerId])) as { kind: string; payload_enc: string } | undefined
   if (!row?.payload_enc) return null
   try {
     const parsed = JSON.parse(row.payload_enc) as CredentialPayload
@@ -40,8 +42,8 @@ function renamePlan(db: DatabaseSync, providerId: string, from: string, to: stri
   }
 }
 
-// 钱包型渠道（按量付费余额）在官方没有用量接口时，用余额差分推算当日消费。
-// 只在本次采集未提供按日用量时启用，避免与真实用量重复计数；token 数无法由余额推出，留 0。
+// 钱包型渠道（按量付费余额）在官方没有按日消费接口时，用余额差分推算当日消费。
+// 只在本次采集未提供按日【消费金额】时启用，避免与真实费用重复计数；token 数无法由余额推出，留 0。
 function deriveDailySpend(
   db: DatabaseSync,
   providerId: string,
@@ -67,8 +69,8 @@ function deriveDailySpend(
   const delta = Number((prev.balance - balance.amount).toFixed(4))
   if (delta > 0) {
     db.prepare(
-      `INSERT INTO usage_daily (provider_id, plan_name, date, input_tokens, output_tokens, cached_tokens, requests, cost_amount, cost_currency, source)
-       VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, 'balance_delta')
+      `INSERT INTO usage_daily (provider_id, plan_name, date, input_tokens, output_tokens, cached_tokens, requests, cost_amount, cost_currency, source, billing)
+       VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, 'balance_delta', 'payg')
        ON CONFLICT(provider_id, plan_name, date) DO UPDATE SET cost_amount = excluded.cost_amount, cost_currency = excluded.cost_currency`
     ).run(providerId, planName, today, delta, balance.currency)
     notes.push(`按日消费由余额差分推算：${prev.balance} − ${balance.amount} = ${delta} ${balance.currency}（Token 数无法推算）`)
@@ -133,14 +135,32 @@ function applyResult(providerId: string, result: PluginFetchResult) {
       }
     } else {
       db.prepare(
-        `INSERT INTO subscription (provider_id, plan_name, price, currency, renewal_date, auto_renew) VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO subscription (provider_id, plan_name, price, currency, renewal_date, auto_renew, unknown_fields) VALUES (?, ?, ?, ?, ?, ?, ?)`
       ).run(
         providerId,
         result.plan.name,
-        result.plan.price ?? 0,
+        result.plan.unknownFields?.includes('price') ? null : (result.plan.price ?? 0),
         result.plan.currency ?? 'CNY',
-        result.plan.renewalDate ?? null,
-        result.plan.autoRenew ? 1 : 0
+        result.plan.unknownFields?.includes('renewalDate') ? null : (result.plan.renewalDate ?? null),
+        result.plan.unknownFields?.includes('autoRenew') ? null : result.plan.autoRenew ? 1 : 0,
+        result.plan.unknownFields?.join(',') ?? ''
+      )
+    }
+    // 采集不到的字段置 NULL 并记录标记，前端红色标「未获取到」；
+    // 换采集方式（如加浏览器登录）后拿到真值时插件传 [] 清除
+    if (result.plan.unknownFields !== undefined) {
+      // set 里是字面量 `col = NULL` 赋值，只有 unknown_fields 一个占位符
+      const set: string[] = []
+      for (const f of result.plan.unknownFields) {
+        if (f === 'price') set.push('price = NULL')
+        if (f === 'renewalDate') set.push('renewal_date = NULL')
+        if (f === 'autoRenew') set.push('auto_renew = NULL')
+      }
+      set.push('unknown_fields = ?')
+      db.prepare(`UPDATE subscription SET ${set.join(', ')} WHERE provider_id = ? AND plan_name = ?`).run(
+        result.plan.unknownFields.join(','),
+        providerId,
+        result.plan.name
       )
     }
   }
@@ -149,9 +169,6 @@ function applyResult(providerId: string, result: PluginFetchResult) {
     db.prepare(
       `INSERT OR REPLACE INTO balance_snapshot (provider_id, date, balance, currency) VALUES (?, date('now'), ?, ?)`
     ).run(providerId, result.balance.amount, result.balance.currency)
-    if (!result.usageDaily?.length) {
-      deriveDailySpend(db, providerId, planName, result.balance, (result.notes ??= []))
-    }
   }
 
   if (result.windows?.length) {
@@ -178,24 +195,43 @@ function applyResult(providerId: string, result: PluginFetchResult) {
     }
   }
 
+  // 声明为区间快照的用量：先删区间内旧行（含其他计划名），再整体写入。
+  // 插件把按量行改挂到独立计划名（plan/API 分流）后，不删旧行会双倍计数
+  if (result.usageDaily?.length && result.usageWindow) {
+    db.prepare(`DELETE FROM usage_daily WHERE provider_id = ? AND date >= ? AND date <= ?`).run(
+      providerId,
+      result.usageWindow.from,
+      result.usageWindow.to
+    )
+  }
+
   for (const u of result.usageDaily ?? []) {
     db.prepare(
-      `INSERT INTO usage_daily (provider_id, plan_name, date, input_tokens, output_tokens, cached_tokens, requests, cost_amount, cost_currency, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'api')
+      `INSERT INTO usage_daily (provider_id, plan_name, date, input_tokens, output_tokens, cached_tokens, requests, cost_amount, cost_currency, source, billing)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'api', ?)
        ON CONFLICT(provider_id, plan_name, date) DO UPDATE SET
          input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens, cached_tokens = excluded.cached_tokens,
-         requests = excluded.requests, cost_amount = excluded.cost_amount, cost_currency = excluded.cost_currency`
+         requests = excluded.requests, cost_amount = excluded.cost_amount, cost_currency = excluded.cost_currency,
+         billing = excluded.billing`
     ).run(
       providerId,
-      planName,
+      u.planName ?? planName,
       u.date,
       u.inputTokens ?? 0,
       u.outputTokens ?? 0,
       u.cachedTokens ?? 0,
       u.requests ?? 0,
       u.costAmount ?? 0,
-      u.currency ?? 'CNY'
+      u.currency ?? 'CNY',
+      u.billing ?? null
     )
+  }
+
+  // 余额差分必须在按日用量写入之后：它按 (provider, plan, date) 补当日 cost，
+  // 先跑会被插件的 0 费用行整行覆盖。只在本次采集没带【按日消费】时启用，
+  // 避免与真实费用重复计数；token 数无法由余额推出，留 0
+  if (result.balance && !result.usageDaily?.some((u) => (u.costAmount ?? 0) > 0)) {
+    deriveDailySpend(db, providerId, planName, result.balance, (result.notes ??= []))
   }
 
   if (result.modelUsage?.length && result.modelUsageWindow) {
@@ -208,8 +244,8 @@ function applyResult(providerId: string, result: PluginFetchResult) {
 
   for (const m of result.modelUsage ?? []) {
     db.prepare(
-      `INSERT OR REPLACE INTO usage_model_daily (provider_id, date, model_id, input_tokens, output_tokens, cached_tokens, thinking_tokens, requests, errors)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT OR REPLACE INTO usage_model_daily (provider_id, date, model_id, input_tokens, output_tokens, cached_tokens, thinking_tokens, requests, errors, billing)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       providerId,
       m.date,
@@ -219,8 +255,16 @@ function applyResult(providerId: string, result: PluginFetchResult) {
       m.cachedTokens ?? 0,
       m.thinkingTokens ?? 0,
       m.requests ?? 0,
-      m.errors ?? 0
+      m.errors ?? 0,
+      m.billing ?? null
     )
+  }
+
+  // 可用模型是「当前状态」快照：整体替换，上游下架的模型才能消失
+  if (result.availableModels !== undefined) {
+    db.prepare(`DELETE FROM available_model WHERE provider_id = ?`).run(providerId)
+    const ins = db.prepare(`INSERT OR REPLACE INTO available_model (provider_id, model_id) VALUES (?, ?)`)
+    for (const m of [...new Set(result.availableModels)]) ins.run(providerId, m)
   }
 }
 
@@ -252,6 +296,7 @@ export async function runProviderSync(providerId: string): Promise<SyncOutcome> 
         providerId,
         dataDir: process.env.DATA_DIR || '.data',
         log: (m) => logs.push(m),
+        loadCredential: (kind?: string) => loadCredential(providerId, kind),
       },
       cred
     )

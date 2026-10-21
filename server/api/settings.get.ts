@@ -6,8 +6,17 @@ export default defineEventHandler((): { settings: AppSettings; tokens: TokenInfo
   const rows = db.prepare(`SELECT key, value FROM settings`).all() as Array<{ key: string; value: string }>
   const kv = Object.fromEntries(rows.map((r) => [r.key, r.value]))
 
+  // created_at / last_used_at 由 datetime('now') 写入，是无时区标记的 UTC 串；转成带 Z 的 ISO 8601，前端才能按本地时间渲染
   const tokens = (
-    db.prepare(`SELECT id, name, token_hash, created_at, last_used_at FROM api_token ORDER BY id`).all() as Array<Record<string, never>>
+    db
+      .prepare(
+        `SELECT id, name, token_hash,
+                COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', created_at), created_at) AS created_at,
+                CASE WHEN last_used_at IS NULL THEN NULL
+                     ELSE COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', last_used_at), last_used_at) END AS last_used_at
+         FROM api_token ORDER BY id`
+      )
+      .all() as Array<Record<string, never>>
   ).map((t) => ({
     id: t.id,
     name: t.name,

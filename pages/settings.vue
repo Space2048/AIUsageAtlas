@@ -28,6 +28,13 @@ async function removeToken(id: number) {
   await refresh()
 }
 
+// 后端返回 ISO 8601（UTC+Z），按本地时区渲染，不能直接切字符串
+function fmtLocal(iso: string): string {
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 useHead({ title: '设置 — AIUsageAtlas' })
 </script>
 
@@ -76,7 +83,7 @@ useHead({ title: '设置 — AIUsageAtlas' })
           <div v-for="t in data?.tokens" :key="t.id" class="token-row">
             <div style="flex:1">
               <div class="token-name">{{ t.name }}</div>
-              <div class="token-meta">创建于 {{ t.createdAt.replace('T', ' ').slice(0, 16) }}<template v-if="t.lastUsedAt"> · 最近使用 {{ t.lastUsedAt.replace('T', ' ').slice(0, 16) }}</template></div>
+              <div class="token-meta">创建于 {{ fmtLocal(t.createdAt) }}<template v-if="t.lastUsedAt"> · 最近使用 {{ fmtLocal(t.lastUsedAt) }}</template></div>
             </div>
             <span class="token-masked">{{ t.masked }}</span>
             <button class="btn btn-danger" @click="removeToken(t.id)">吊销</button>

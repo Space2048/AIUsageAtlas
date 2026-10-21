@@ -1,0 +1,86 @@
+/* AIUsageAtlas 悬浮球 — 设计 token 与主站 assets/css/main.css 同源：
+   暖纸白底 · 大圆角 · 柔阴影 · 珊瑚渐变球。窗口透明，根元素不铺底色。 */
+:root {
+  --bg: #f7f5f0;
+  --bg-card: #fff;
+  --bg-elevated: #fbfaf7;
+  --bg-sunken: #f1eee7;
+  --border: #eae6dd;
+  --border-bright: #ddd8cc;
+  --text: #26241f;
+  --text-dim: #7d786d;
+  --text-faint: #b0aa9e;
+  --ink: #26241f;
+  --accent: #4a7dff;
+  --accent-soft: #e8efff;
+  --green: #2fa36b;
+  --green-soft: #e2f4ea;
+  --amber: #e0952a;
+  --amber-soft: #fdf0dc;
+  --red: #e8594f;
+  --red-soft: #fde8e6;
+  --coral: #f4643c;
+  --coral-light: #ff9a6c;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --shadow-md: 0 1px 2px rgba(38, 36, 31, 0.04), 0 10px 28px rgba(38, 36, 31, 0.07);
+  --shadow-lg: 0 2px 6px rgba(38, 36, 31, 0.06), 0 24px 60px rgba(38, 36, 31, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  color: var(--text);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滚动条：面板内渠道列表用 */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-bright) transparent;
+}
+.thin-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 3px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes atlas-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spinning {
+  animation: atlas-spin 0.9s linear infinite;
+}

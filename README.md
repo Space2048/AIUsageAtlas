@@ -1,5 +1,9 @@
 # AIUsageAtlas
 
+<p align="center">
+  <img src="public/icon.svg" width="96" alt="AIUsageAtlas 图标">
+</p>
+
 自托管的「AI 供应商额度与用量聚合器」：把各 AI 平台/代理平台的额度、配额窗口、订阅计划、每日用量和费用汇总到一个本地仪表盘。
 
 ## 功能
@@ -35,6 +39,8 @@ npm run dev        # http://localhost:3000
 ```
 ├── pages/               # 页面（仪表盘/详情/价格表/设置）
 ├── components/          # AppHeader 等
+├── public/              # 图标：icon.svg（矢量源）/ favicon.ico / apple-touch-icon.png
+├── scripts/             # 诊断脚本与图标生成（node scripts/generate-icons.mjs）
 ├── server/
 │   ├── api/             # REST 接口
 │   └── utils/           # SQLite 连接、建表、种子数据
@@ -44,7 +50,7 @@ npm run dev        # http://localhost:3000
 
 ## 数据模型
 
-见 [docs/01-architecture.md](docs/01-architecture.md) §2.2：provider / account_profile / subscription / quota_window / usage_daily / usage_model_daily / balance_snapshot / model_price / credential / sync_config / sync_log / alert_rule / api_token / settings。
+15 张表的字段、ER 图、采集落库数据流与写入语义见 [docs/02-data-model.md](docs/02-data-model.md)；选型层面的说明在 [docs/01-architecture.md](docs/01-architecture.md) §2.2。
 
 ## 渠道插件
 
@@ -60,7 +66,7 @@ interface ProviderPlugin {
 }
 ```
 
-同步流程：`/api/sync` → `sync-runner` 加载凭证 → 调插件 → 归一化写入 SQLite → 记录 `sync_log`（错误分类：`auth_expired` / `endpoint_changed` / `network` / `parse` / `not_configured`）。**未配置凭证的供应商保持模拟数据**，不影响演示。
+同步流程：`/api/sync` → `sync-runner` 加载凭证 → 调插件 → 归一化写入 SQLite → 记录 `sync_log`（错误分类：`auth_expired` / `endpoint_changed` / `network` / `parse` / `not_configured`）。**没有凭证就不产数据**：同步记为 `not_configured` 失败，界面上是空态，不用模拟值填充。
 
 **自动同步**：内置轻量调度器（`server/plugins/scheduler.server.ts`）每 60s 检查一次，按各供应商 `sync_config.interval_sec` + 抖动到期执行，日志自动裁剪（每渠道保留最近 100 条）。添加供应商时会立即触发一次后台同步。
 
