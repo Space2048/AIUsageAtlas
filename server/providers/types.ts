@@ -63,6 +63,11 @@ export interface PluginFetchResult {
   windows?: PluginWindow[]
   usageDaily?: PluginUsageDay[]
   modelUsage?: PluginModelUsage[]
+  /**
+   * 声明 modelUsage 是「某日期区间的累计快照」而非逐日明细：
+   * 写入前先删除该区间内的旧行，否则每次同步都换一个新日期，按模型求和会重复累加。
+   */
+  modelUsageWindow?: { from: string; to: string }
   notes?: string[]
 }
 

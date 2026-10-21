@@ -139,6 +139,13 @@ const credResult = ref<{ ok: boolean; message: string } | null>(null)
 
 const pluginMeta = computed(() => plugins.value.find((p) => p.id === detail.value?.pluginId))
 
+// 只支持 API Key 的渠道没有 Cookie 模式，不能给「配置 Cookie 后可补全」这种做不到的建议
+const consoleHint = computed(() =>
+  (pluginMeta.value?.authKinds ?? []).some((k) => k !== 'apikey')
+    ? '，配置 Cookie 或浏览器登录后可补全'
+    : '，该平台无公开接口可补全'
+)
+
 onMounted(async () => {
   plugins.value = await $fetch('/api/plugins')
 })
@@ -276,7 +283,7 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
                 <div class="quota-reset">{{ countdown(w.resetAt) }}</div>
               </div>
             </template>
-            <div v-else class="quota-empty">官方 API 不提供额度窗口，配置 Cookie 后可通过控制台采集补全</div>
+            <div v-else class="quota-empty">官方 API 不提供额度窗口{{ consoleHint }}</div>
           </div>
         </div>
 
@@ -306,7 +313,7 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
         </div>
         <div v-else class="panel full">
           <div class="panel-title">近 30 日用量</div>
-          <div class="quota-empty">官方 API 不提供历史用量明细，控制台采集（Cookie）可补全</div>
+          <div class="quota-empty">官方 API 不提供历史用量明细{{ consoleHint }}</div>
         </div>
 
         <!-- 模型明细 -->
@@ -332,7 +339,7 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
                 <td class="num muted">{{ m.inputPerM !== null ? fmtCost(m.inputPerM, m.currency || 'USD') : '—' }}</td>
                 <td class="num muted">{{ m.outputPerM !== null ? fmtCost(m.outputPerM, m.currency || 'USD') : '—' }}</td>
               </tr>
-              <tr v-if="!detail.modelUsage.length"><td colspan="6" class="muted" style="text-align:center;padding:20px">暂无模型明细（官方 API 不提供，控制台采集可补全）</td></tr>
+              <tr v-if="!detail.modelUsage.length"><td colspan="6" class="muted" style="text-align:center;padding:20px">暂无模型明细（官方 API 不提供{{ consoleHint }}）</td></tr>
             </tbody>
           </table>
         </div>

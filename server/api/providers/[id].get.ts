@@ -1,3 +1,4 @@
+import { getPlugin } from '~~/server/providers'
 import { getDb } from '~~/server/utils/db'
 import type { ModelUsageRow, ProviderDetail, SyncLogRow, UsageDay } from '~~/shared/types'
 
@@ -117,7 +118,7 @@ export default defineEventHandler((event): ProviderDetail => {
     modelUsage,
     syncLogs,
     sync: { enabled: !!sync?.enabled, intervalSec: sync?.interval_sec ?? 3600 },
-    authKinds: ['apikey', 'cookie', 'browser-login'],
+    authKinds: getPlugin(p.plugin_id)?.authMethods ?? [],
     credential: { configured: !!credRow, kind: credRow?.kind ?? null },
   }
 })

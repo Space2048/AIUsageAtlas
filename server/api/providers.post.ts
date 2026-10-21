@@ -29,7 +29,6 @@ export default defineEventHandler(async (event) => {
     id,
     plugin?.scheduleDefaultSec ?? 3600
   )
-  db.prepare(`INSERT INTO sync_log (provider_id, status, duration_ms) VALUES (?, 'ok', 0)`).run(id)
 
   const authKind = body.authKind || plugin?.authMethods[0] || 'apikey'
   if (authKind === 'browser-login') {

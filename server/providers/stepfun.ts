@@ -178,26 +178,32 @@ function buildSnapshot(
   const periodPlan = planRecords.filter((r) => (num(r.from_time) ?? 0) >= periodStartMs)
   const usedCredits = periodPlan.reduce((a, r) => a + (num(r.credit_consumed) ?? 0), 0)
 
-  // 额度窗口优先取 RateLimit 的 credit_buckets（权威：total/residual/next_reset）
+  // 额度窗口：credit_buckets 是权威来源（total/residual/next_reset），按 bucket.type 分别建窗口。
+  // 之前只取第一个 total>0 的桶并统一叫「套餐周期 Credits」，会把充值池当成订阅池展示。
+  const BUCKET_LABELS: Record<number, string> = { 1: '订阅 Credits', 2: '充值 Credits' }
   const windows: NonNullable<PluginFetchResult['windows']> = []
-  const buckets = rateLimit?.plan_credit_rate_limit?.credit_buckets ?? []
-  const mainBucket = buckets.find((b) => (num(b.credit_total) ?? 0) > 0)
-  if (mainBucket) {
-    const total = num(mainBucket.credit_total) ?? 0
-    const residual = num(mainBucket.credit_residual) ?? 0
-    const nextReset = num(mainBucket.next_reset_at)
+  const planRate = rateLimit?.plan_credit_rate_limit
+  const buckets = planRate?.credit_buckets ?? []
+  for (const b of buckets) {
+    const total = num(b.credit_total) ?? 0
+    if (total <= 0) continue
+    const residual = num(b.credit_residual) ?? 0
+    const nextReset = num(b.next_reset_at)
+    const expire = num(b.expire_at)
+    const resetSec = nextReset && nextReset > 0 ? nextReset : expire
     windows.push({
-      name: '套餐周期 Credits',
-      usedPct: total > 0 ? Math.min(100, Math.round(((total - residual) / total) * 1000) / 10) : 0,
+      name: BUCKET_LABELS[num(b.type) ?? 0] ?? `额度桶 ${b.type ?? '?'}`,
+      usedPct: Math.min(100, Math.max(0, Math.round(((total - residual) / total) * 1000) / 10)),
       usedValue: total - residual,
       limitValue: total,
       unit: 'credits',
-      resetAt: nextReset ? new Date(nextReset * 1000).toISOString() : null,
+      resetAt: resetSec ? new Date(resetSec * 1000).toISOString() : null,
     })
-  } else if (usedCredits > 0) {
+  }
+  if (!windows.length && usedCredits > 0) {
     // 兜底：无 bucket 信息时按用量展示
     windows.push({
-      name: '套餐周期 Credits',
+      name: '订阅 Credits',
       usedPct: 0,
       usedValue: usedCredits,
       limitValue: null,
@@ -206,7 +212,8 @@ function buildSnapshot(
     })
   }
 
-  // 5 小时 / 周窗口（部分套餐族提供）
+  // 5 小时 / 周窗口（部分套餐族提供）。left_rate 为 0 且无 reset 时间表示该套餐族不适用，
+  // 不能当成「已用满 100%」
   const rl5h = num(rateLimit?.five_hour_usage_left_rate)
   const rlWeek = num(rateLimit?.weekly_usage_left_rate)
   if (rl5h !== undefined && (rl5h > 0 || num(rateLimit?.five_hour_usage_reset_time))) {
@@ -235,7 +242,7 @@ function buildSnapshot(
   }
 
   const byDay = new Map<string, { input: number; output: number; cached: number; requests: number; cost: number }>()
-  const byModel = new Map<string, { input: number; output: number; cached: number; requests: number; cost: number }>()
+  const byModelDay = new Map<string, { date: string; modelId: string; input: number; output: number; cached: number; requests: number; cost: number }>()
 
   const add = (day: string, modelId: string, input: number, output: number, cached: number, calls: number, cost: number) => {
     const d = byDay.get(day) ?? { input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
@@ -246,13 +253,14 @@ function buildSnapshot(
     d.cost += cost
     byDay.set(day, d)
 
-    const m = byModel.get(modelId) ?? { input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
+    const key = `${day}|${modelId}`
+    const m = byModelDay.get(key) ?? { date: day, modelId, input: 0, output: 0, cached: 0, requests: 0, cost: 0 }
     m.input += input
     m.output += output
     m.cached += cached
     m.requests += calls
     m.cost += cost
-    byModel.set(modelId, m)
+    byModelDay.set(key, m)
   }
 
   for (const r of planRecords) {
@@ -295,16 +303,29 @@ function buildSnapshot(
       currency: 'CNY',
     }))
 
-  const modelUsage = [...byModel.entries()]
-    .sort(([, a], [, b]) => b.input + b.output - (a.input + a.output))
-    .map(([modelId, v]) => ({
-      date: usageDaily.at(-1)?.date ?? tsToDate(nowSec),
-      modelId,
+  // 按「日 + 模型」输出真实单日明细：此前按模型累计后再盖上最后一个日期，
+  // 会让模型明细比同日总用量大数倍
+  const modelUsage = [...byModelDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date) || b.input + b.output - (a.input + a.output))
+    .map((v) => ({
+      date: v.date,
+      modelId: v.modelId,
       inputTokens: v.input,
       outputTokens: v.output,
       cachedTokens: v.cached,
       requests: v.requests,
     }))
+
+  // 窗口报告「未消耗」但查询区间内有真实 token 时，两个口径矛盾，明确写进 notes，
+  // 不再静默展示一个 0% 的指标让人误读成额度充足
+  const periodTokens = usageDaily.reduce((a, u) => a + u.inputTokens + u.outputTokens + u.cachedTokens, 0)
+  const idleCreditWindow = windows.find((w) => w.unit === 'credits' && (w.usedValue ?? 0) === 0 && (w.limitValue ?? 0) > 0)
+  if (idleCreditWindow && periodTokens > 0) {
+    notes.push(
+      `口径冲突：${idleCreditWindow.name} 报告已用 0/${idleCreditWindow.limitValue}（订阅剩余率 ${planRate?.subscription_credit_left_rate ?? '未知'}），` +
+        `但查询区间内有 ${periodTokens} tokens 用量，请以控制台页面为准`
+    )
+  }
 
   const maskedMobile = userInfo?.mobile ? userInfo.mobile.replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2') : undefined
 

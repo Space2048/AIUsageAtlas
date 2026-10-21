@@ -36,8 +36,7 @@ const EP = {
   balance: '/api/v1/balance',
   planUsage: '/api/v1/tokenPlan/usage',
   planDetail: '/api/v1/tokenPlan/detail',
-  subStatus: '/api/v1/subscription/status',
-  usageList: '/api/v1/usage/detail/list',
+  planList: '/api/v1/tokenPlan/list',
 }
 
 function num(v: unknown): number | undefined {
@@ -135,7 +134,19 @@ function pickBalance(raw: unknown): { amount: number; currency: string } | undef
   return { amount, currency: d.currency || 'CNY' }
 }
 
-// tokenPlan/usage 的 items 可能是数组，也可能是以指标名为键的对象
+// tokenPlan/detail 不含价格，目录价在 tokenPlan/list 里按 planCode 匹配
+function pickPriceForPlan(raw: unknown, planCode?: string): { price: number; currency: string } | undefined {
+  if (!planCode) return undefined
+  const d = unwrap(raw)
+  const rows = (Array.isArray(d) ? d : (d.list ?? d.records)) as Array<Record<string, unknown>> | undefined
+  if (!Array.isArray(rows)) return undefined
+  const hit = rows.find((r) => String(r.planCode ?? '') === planCode)
+  if (!hit) return undefined
+  const price = num(hit.planPrice) ?? num(hit.discountPrice) ?? num(hit.originalPrice)
+  if (price === undefined) return undefined
+  return { price, currency: String(hit.currency ?? 'CNY') }
+}
+
 interface MiPlanItem {
   name: string
   used: number
@@ -143,89 +154,77 @@ interface MiPlanItem {
   pct: number
 }
 
+// tokenPlan/usage 实测（2026-10-20）同时返回两组：
+// data.usage.items = [plan_total_token, compensation_total_token]，data.monthUsage.items = [month_total_token]
 function pickPlanItems(raw: unknown): MiPlanItem[] {
   const d = unwrap(raw)
-  const usage = (d.usage && typeof d.usage === 'object' ? d.usage : d) as Record<string, unknown>
-  const items = usage.items ?? usage.plans
-  const pairs: Array<[string, unknown]> = Array.isArray(items)
-    ? items.map((it, i) => [String((it as Record<string, unknown>)?.name ?? (it as Record<string, unknown>)?.key ?? `item${i}`), it])
-    : items && typeof items === 'object'
-      ? Object.entries(items as Record<string, unknown>)
-      : []
-
   const LABELS: Record<string, string> = {
     plan_total_token: '套餐 Credits',
     compensation_total_token: '补偿 Credits',
+    month_total_token: '本月 Credits',
   }
+  const groups = [d.usage, d.monthUsage].filter((g): g is Record<string, unknown> => !!g && typeof g === 'object')
 
   const out: MiPlanItem[] = []
-  for (const [key, value] of pairs) {
-    const v = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
-    const used = num(v.used) ?? num(v.usedValue) ?? num(v.total)
-    const limit = num(v.limit) ?? num(v.limitValue) ?? num(v.totalQuota)
-    let pct = num(v.percent) ?? num(v.usagePercent)
-    if (used !== undefined && limit && limit > 0) pct = (used / limit) * 100
-    if (pct === undefined || used === undefined || limit === undefined) continue
-    if (pct <= 1 && limit > 1) pct *= 100
-    out.push({ name: LABELS[key] ?? key, used, limit, pct })
+  const seen = new Set<string>()
+  for (const g of groups) {
+    const items = g.items ?? g.plans
+    const rows: Array<Record<string, unknown>> = Array.isArray(items)
+      ? (items as Array<Record<string, unknown>>)
+      : items && typeof items === 'object'
+        ? Object.entries(items as Record<string, unknown>).map(([k, v]) => ({ name: k, ...((v ?? {}) as Record<string, unknown>) }))
+        : []
+    for (const it of rows) {
+      const key = String(it.name ?? '')
+      const used = num(it.used) ?? num(it.usedValue) ?? num(it.total)
+      const limit = num(it.limit) ?? num(it.limitValue) ?? num(it.totalQuota)
+      if (!key || used === undefined || limit === undefined || seen.has(key)) continue
+      seen.add(key)
+      const pct = limit > 0 ? (used / limit) * 100 : (num(it.percent) ?? num(it.usagePercent) ?? 0) * 100
+      out.push({ name: LABELS[key] ?? key, used, limit, pct })
+    }
   }
   return out
 }
 
 interface MiSubStatus {
+  planCode?: string
   planName?: string
   plan_type?: string
   planType?: string
   productName?: string
+  // tokenPlan/detail 实测字段（2026-10-20）：currentPeriodEnd 是「2026-10-24 23:59:59」裸串
+  currentPeriodEnd?: number | string
   expireTime?: number | string
   endTime?: number | string
   nextPayTime?: number | string
   renewTime?: number | string
+  enableAutoRenew?: boolean | number
   autoRenew?: boolean | number
   price?: number | string
   amount?: number | string
 }
 
-function pickPlan(raw: unknown): { name: string; price?: number; renewalDate: string | null; autoRenew?: boolean } | undefined {
+function pickPlan(raw: unknown): { name: string; planCode?: string; price?: number; renewalDate: string | null; autoRenew?: boolean } | undefined {
   const d = unwrap(raw) as MiSubStatus
   const name = d.planName ?? d.productName ?? d.planType ?? d.plan_type
   if (!name) return undefined
-  const renewalDate = toIso(d.nextPayTime ?? d.renewTime ?? d.expireTime ?? d.endTime) ?? null
-  const autoRenew = typeof d.autoRenew === 'boolean' ? d.autoRenew : num(d.autoRenew)
+  const renewalDate = toIso(d.currentPeriodEnd ?? d.nextPayTime ?? d.renewTime ?? d.expireTime ?? d.endTime) ?? null
+  const auto = d.enableAutoRenew ?? d.autoRenew
+  const autoRenew = typeof auto === 'boolean' ? auto : num(auto)
   return {
     name: String(name),
+    planCode: d.planCode,
     price: num(d.price) ?? num(d.amount),
     renewalDate,
     autoRenew: autoRenew === undefined ? undefined : !!autoRenew,
   }
 }
 
-interface MiUsageRow {
-  date?: string | number
-  consumedAmount?: number | string
-  amount?: number | string
-  currency?: string
-}
-
-function pickUsageDays(raw: unknown): Array<{ date: string; costAmount: number; currency: string }> {
-  const d = unwrap(raw)
-  const rows = (Array.isArray(d) ? d : (d.list ?? d.records ?? d.details)) as MiUsageRow[] | undefined
-  if (!Array.isArray(rows)) return []
-  const out: Array<{ date: string; costAmount: number; currency: string }> = []
-  for (const r of rows) {
-    const date = toDay(r.date)
-    const cost = num(r.consumedAmount) ?? num(r.amount)
-    if (!date || cost === undefined) continue
-    out.push({ date, costAmount: cost, currency: r.currency || 'CNY' })
-  }
-  return out.sort((a, b) => a.date.localeCompare(b.date))
-}
-
 function assemble(parts: {
   balance?: { amount: number; currency: string }
   items: MiPlanItem[]
   plan?: ReturnType<typeof pickPlan>
-  days: Array<{ date: string; costAmount: number; currency: string }>
   userId?: string
 }): PluginFetchResult {
   const notes: string[] = []
@@ -257,15 +256,9 @@ function assemble(parts: {
     }
   }
 
-  if (parts.days.length) {
-    // 控制台只给每日消费金额，token 数不在此接口中
-    res.usageDaily = parts.days.map((d) => ({ ...d, inputTokens: 0, outputTokens: 0 }))
-  } else {
-    notes.push('未取到按日消费（/api/v1/usage/detail/list 无数据）')
-  }
-
   res.account = {
-    userName: parts.plan?.name ?? 'MiMo 用户',
+    // 控制台没有可用的账户信息端点，计划名不是用户名
+    userName: 'MiMo 用户',
     maskedContact: parts.userId ? `小米账号 ${parts.userId}` : '',
     region: 'CN',
   }
@@ -313,44 +306,31 @@ async function apiInPage<T>(page: import('playwright').Page, req: PageRequest): 
 async function collectFromConsole(
   call: <T>(req: PageRequest) => Promise<{ status: number; data: T | null }>
 ): Promise<{ result: PluginFetchResult; authFailed: boolean }> {
-  // 未登录时网关对【任意】/api/v1/* 都返回 401，因此只有全部接口都 401 才判定会话失效；
-  // 个别 401 更可能是路径变更，此时仍返回已取到的部分数据。
-  const statuses: number[] = []
-
-  const bal = await call<unknown>({ path: EP.balance, method: 'GET', body: undefined })
-  statuses.push(bal.status)
-
-  const planUsage = await call<unknown>({ path: EP.planUsage, method: 'GET', body: undefined })
-  const subStatus = await call<unknown>({ path: EP.subStatus, method: 'GET', body: undefined })
-  const planDetail = await call<unknown>({ path: EP.planDetail, method: 'GET', body: undefined })
-  statuses.push(planUsage.status, subStatus.status, planDetail.status)
-
-  const now = new Date()
-  const days: Array<{ date: string; costAmount: number; currency: string }> = []
-  for (let back = 0; back < 3; back++) {
-    const y = new Date(now.getFullYear(), now.getMonth() - back, 1)
-    const res = await call<unknown>({
-      path: EP.usageList,
-      method: 'POST',
-      body: { year: y.getFullYear(), month: y.getMonth() + 1 },
-    })
-    if (back === 0) statuses.push(res.status)
-    if (res.status !== 200) break
-    for (const d of pickUsageDays(res.data)) {
-      if (!days.some((x) => x.date === d.date)) days.push(d)
-    }
+  // 控制台 SPA 对任意 401/403 都执行全局登出并清空 Cookie，一次失手整个会话即报废。
+  // 所以逐个探测、一见 401/403 就停止后续请求，让调用方抛错且不把受损会话落盘。
+  let authFailed = false
+  const probe = async <T>(req: PageRequest): Promise<{ status: number; data: T | null }> => {
+    if (authFailed) return { status: 0, data: null }
+    const res = await call<T>(req)
+    if (res.status === 401 || res.status === 403) authFailed = true
+    return res
   }
 
-  const authFailed = statuses.every((s) => s === 401 || s === 403)
-  const plan = pickPlan(subStatus.data) ?? pickPlan(planDetail.data)
+  const bal = await probe<unknown>({ path: EP.balance, method: 'GET', body: undefined })
+  const planUsage = await probe<unknown>({ path: EP.planUsage, method: 'GET', body: undefined })
+  const planDetail = await probe<unknown>({ path: EP.planDetail, method: 'GET', body: undefined })
+  const planList = await probe<unknown>({ path: EP.planList, method: 'GET', body: undefined })
+
+  const plan = pickPlan(planDetail.data)
+  const priced = plan ? { ...plan, price: pickPriceForPlan(planList.data, plan.planCode)?.price ?? plan.price } : undefined
   const result = assemble({
     balance: pickBalance(bal.data),
     items: pickPlanItems(planUsage.data),
-    plan,
-    days: days.sort((a, b) => a.date.localeCompare(b.date)),
+    plan: priced,
   })
   result.notes?.push(
-    `控制台状态：balance ${bal.status}、planUsage ${planUsage.status}、sub ${subStatus.status}、planDetail ${planDetail.status}、usage ${statuses.at(-1)}`
+    `控制台状态：balance ${bal.status}、planUsage ${planUsage.status}、planDetail ${planDetail.status}、planList ${planList.status}` +
+      (authFailed ? '；已中断后续请求（SPA 全局登出会清空 Cookie）' : '')
   )
   return { result, authFailed }
 }
@@ -376,7 +356,7 @@ async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
     apiInPage<T>(page, req)
   )
   if (authFailed) {
-    throw new PluginError('auth_expired', '控制台接口全部 401：serviceToken 已过期请重新登录，或平台接口路径已变更')
+    throw new PluginError('auth_expired', '控制台接口返回 401/403：SPA 全局登出已清空会话 Cookie，请重新浏览器登录（详情页 → 更新凭证 → 浏览器登录）')
   }
   // 页面里的 token 可能已续期，刷新快照让重启后也能恢复
   await snapshotSession(ctx.providerId, ctx.dataDir).catch(() => {})
@@ -404,7 +384,7 @@ async function fetchViaPastedCookie(ctx: PluginContext, cookie: string): Promise
 
   const { result, authFailed } = await collectFromConsole(call)
   if (authFailed) {
-    throw new PluginError('auth_expired', 'Cookie 模式全部接口 401：Cookie 约 24 小时过期，请重新粘贴或改用浏览器登录')
+    throw new PluginError('auth_expired', 'Cookie 模式接口 401/403：Cookie 约 24 小时过期，请重新粘贴或改用浏览器登录')
   }
   ctx.log('Cookie 模式采集完成')
   return result
@@ -494,7 +474,7 @@ export const xiaomimoPlugin: ProviderPlugin = {
           }
           const probe = await withTimeout(
             Promise.all(
-              [EP.balance, EP.planUsage, EP.subStatus].map((path) =>
+              [EP.balance, EP.planUsage, EP.planDetail].map((path) =>
                 apiInPage<unknown>(page, { path, method: 'GET', body: undefined })
               )
             ),

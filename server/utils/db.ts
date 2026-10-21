@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { applyOfficialPrices } from './price-catalog'
 
 let db: DatabaseSync | null = null
 
@@ -11,6 +12,7 @@ export function getDb(): DatabaseSync {
   db = new DatabaseSync(join(dataDir, 'aiusageatlas.db'))
   db.exec('PRAGMA journal_mode = WAL;')
   migrate(db)
+  applyOfficialPrices(db)
   // 轻量列迁移：老库补 icon 列
   try {
     db.exec(`ALTER TABLE provider ADD COLUMN icon TEXT DEFAULT ''`)

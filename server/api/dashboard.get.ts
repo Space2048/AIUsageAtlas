@@ -1,12 +1,24 @@
 import { getDb } from '~~/server/utils/db'
-import { seedIfEmpty } from '~~/server/utils/seed'
+import { getPlugin } from '~~/server/providers'
 import type { DashboardData, ProviderVM, QuotaWindow, UsageDay } from '~~/shared/types'
+
+// 插件写入 usage_daily 的日期是 UTC 日（tsToDate 用 toISOString），这里必须同口径，
+// 否则东八区每天 0~8 点会把「今天」查成昨天
+const utcDay = (back = 0) => new Date(Date.now() - back * 86400_000).toISOString().slice(0, 10)
+
+interface DayAgg {
+  tokens: number
+  cost_amount: number
+  cost_currency: string | null
+}
 
 export default defineEventHandler((): DashboardData => {
   const db = getDb()
-  seedIfEmpty(db)
 
-  const USD_TO_CNY = 7.1
+  const settingRows = db.prepare(`SELECT key, value FROM settings`).all() as Array<{ key: string; value: string }>
+  const kv = Object.fromEntries(settingRows.map((r) => [r.key, r.value]))
+  const FX_TO_CNY = Number(kv.fx_rate) || 7.1
+  const today = utcDay()
 
   const providerRows = db
     .prepare(`SELECT id, plugin_id, display_name, category, icon FROM provider ORDER BY rowid`)
@@ -40,16 +52,28 @@ export default defineEventHandler((): DashboardData => {
       .prepare(`SELECT balance, currency FROM balance_snapshot WHERE provider_id = ? ORDER BY date DESC LIMIT 1`)
       .get(p.id) as { balance: number; currency: string } | undefined
 
-    const history: UsageDay[] = (
-      db
-        .prepare(
-          `SELECT date, (input_tokens + output_tokens + cached_tokens) AS tokens, cost_amount, cost_currency
-           FROM usage_daily WHERE provider_id = ? ORDER BY date DESC LIMIT 7`
-        )
-        .all(p.id) as Array<{ date: string; tokens: number; cost_amount: number; cost_currency: string }>
-    )
-      .reverse()
-      .map((r) => ({ date: r.date, tokens: r.tokens, costAmount: r.cost_amount, currency: r.cost_currency }))
+    // 近 7 个日历日，无数据的日期补 0（原来取「最近 7 条记录」，稀疏时跨度会远超 7 天）
+    const dayRows = db
+      .prepare(
+        `SELECT date, SUM(input_tokens + output_tokens + cached_tokens) AS tokens,
+                SUM(cost_amount) AS cost_amount, MAX(cost_currency) AS cost_currency
+         FROM usage_daily WHERE provider_id = ? AND date >= ? GROUP BY date`
+      )
+      .all(p.id, utcDay(6)) as Array<DayAgg & { date: string }>
+    const byDate = new Map(dayRows.map((r) => [r.date, r]))
+    const history: UsageDay[] = Array.from({ length: 7 }, (_, i) => {
+      const date = utcDay(6 - i)
+      const row = byDate.get(date)
+      return { date, tokens: row?.tokens ?? 0, costAmount: row?.cost_amount ?? 0, currency: row?.cost_currency ?? plan.currency }
+    })
+
+    const todayRow = db
+      .prepare(
+        `SELECT SUM(input_tokens + output_tokens + cached_tokens) AS tokens,
+                SUM(cost_amount) AS cost_amount, MAX(cost_currency) AS cost_currency
+         FROM usage_daily WHERE provider_id = ? AND date = ?`
+      )
+      .get(p.id, today) as DayAgg | undefined
 
     const lastSync = db
       .prepare(`SELECT started_at, status FROM sync_log WHERE provider_id = ? ORDER BY id DESC LIMIT 1`)
@@ -61,7 +85,7 @@ export default defineEventHandler((): DashboardData => {
       displayName: p.display_name,
       category: p.category as ProviderVM['category'],
       icon: p.icon || '',
-      authKinds: ['apikey', 'cookie', 'browser-login'],
+      authKinds: getPlugin(p.plugin_id)?.authMethods ?? [],
       account: {
         userName: profile?.user_name ?? '未连接',
         maskedContact: profile?.masked_contact ?? '',
@@ -77,9 +101,9 @@ export default defineEventHandler((): DashboardData => {
       balance: balance ? { amount: balance.balance, currency: balance.currency } : null,
       windows,
       today: {
-        tokens: history.at(-1)?.tokens ?? 0,
-        cost: history.at(-1)?.costAmount ?? 0,
-        currency: history.at(-1)?.currency ?? plan.currency,
+        tokens: todayRow?.tokens ?? 0,
+        cost: todayRow?.cost_amount ?? 0,
+        currency: todayRow?.cost_currency ?? plan.currency,
       },
       history,
       lastSyncAt: lastSync?.started_at ?? new Date().toISOString(),
@@ -87,26 +111,26 @@ export default defineEventHandler((): DashboardData => {
     }
   })
 
-  const today = providers.reduce((acc, p) => acc + p.today.tokens, 0)
+  const todayTokens = providers.reduce((acc, p) => acc + p.today.tokens, 0)
   const costCny = providers.reduce(
-    (acc, p) => acc + (p.today.currency === 'USD' ? p.today.cost * USD_TO_CNY : p.today.cost),
+    (acc, p) => acc + (p.today.currency === 'USD' ? p.today.cost * FX_TO_CNY : p.today.cost),
     0
   )
-  const monthStart = new Date().toISOString().slice(0, 8) + '01'
-  const renewalsThisMonth = providerRows.filter((p) => {
+  // 「30 天内续费」= 今天起 30 天内到期，不含已过期（原来的「本月 1 号起」会把已过期的当月续费漏掉）
+  const renewalsSoon = providerRows.filter((p) => {
     const sub = db
-      .prepare(`SELECT renewal_date FROM subscription WHERE provider_id = ? AND renewal_date >= ? AND renewal_date <= date('now', '+1 month')`)
-      .get(p.id, monthStart) as { renewal_date: string } | undefined
+      .prepare(`SELECT renewal_date FROM subscription WHERE provider_id = ? AND renewal_date >= ? AND renewal_date <= ?`)
+      .get(p.id, today, utcDay(-30)) as { renewal_date: string } | undefined
     return !!sub
   }).length
 
   return {
     generatedAt: new Date().toISOString(),
     summary: {
-      todayTokens: today,
+      todayTokens,
       todayCostCny: Number(costCny.toFixed(2)),
       activeProviders: providers.length,
-      renewalsThisMonth,
+      renewalsThisMonth: renewalsSoon,
       alerts: (db.prepare(`SELECT COUNT(*) AS n FROM alert_rule WHERE enabled = 1`).get() as { n: number }).n,
     },
     providers,
