@@ -1,0 +1,24 @@
+[package]
+name = "aiusageatlas-desktop"
+version = "0.1.0"
+description = "AIUsageAtlas — AI 用量悬浮球桌面客户端"
+edition = "2021"
+private = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon: 托盘菜单；image-png/image-ico: 运行期解码 bundle.icon 图标
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+windows-subsystem = "windows"

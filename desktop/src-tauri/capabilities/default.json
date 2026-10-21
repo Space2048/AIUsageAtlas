@@ -1,0 +1,16 @@
+{
+  "identifier": "default",
+  "description": "悬浮球与展开面板窗口的核心能力（拖拽/显隐/定位/事件/打开链接）",
+  "windows": ["ball", "panel"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-position",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "opener:default"
+  ]
+}

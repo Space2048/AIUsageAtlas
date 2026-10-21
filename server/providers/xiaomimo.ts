@@ -1,13 +1,15 @@
 import { fetchJson } from '~~/server/utils/http'
 import { normalizeCookie } from '~~/server/utils/cookie'
-import { ensureProfileDir, isLoggedIn, markLoggedIn } from '~~/server/utils/browser-profile'
-import { closeSession, ensureLivePage, isPageAlive, persistStorageState, snapshotSession, startKeepAlive } from '~~/server/utils/browser-session'
+import { isLoggedIn, markLoggedIn } from '~~/server/utils/browser-profile'
+import { closeSession, ensureLivePage, isPageAlive, launchLoginWindow, persistStorageState, snapshotSession, startKeepAlive } from '~~/server/utils/browser-session'
 import {
   PluginError,
   type CredentialPayload,
   type PluginContext,
   type PluginFetchResult,
   type PluginLoginResult,
+  type PluginModelUsage,
+  type PluginUsageDay,
   type ProviderPlugin,
 } from './types'
 
@@ -26,6 +28,21 @@ import {
  *
  * 控制台接口路径来自前端 bundle 的静态常量与第三方余额监控插件源码，
  * 官方文档未记载；响应字段结构在真实账号上验证前按候选名容错解析。
+ *
+ * 2026-10-21 补齐（嗅探 /console/usage 页真实请求实测）：
+ * · GET  /api/v1/models               —— 模型列表（OpenRouter 风格，id 带厂商前缀）
+ * · GET  /api/v1/userProfile          —— 脱敏手机号/邮箱（页面注释里说的「没有账户端点」已过时）
+ * · GET  /api/v1/usage                —— 历史累计 Token/消费 + 账号限流配额
+ * · POST /api/v1/usage/detail/list    —— body {year,month}，返回【按天×模型】明细行，
+ *                                          字段 date/model/currency/consumedAmount/
+ *                                          inputHitToken/inputMissToken/outputToken/requestCount，
+ *                                          日期为 UTC，次日 07:00 UTC 校对；月份粒度只能整月拉
+ * · POST /api/v1/usage/token-plan/list —— body {year,month}，Token Plan 套餐【按天×模型】用量。
+ *    2026-10-21 实测：订阅账号的当期消耗几乎全在这条流上（10 月账单明细 0 行、套餐明细 13 行
+ *    含当日 4790 万 tokens），与账单明细是两条独立数据流，必须都收并按日期合并，
+ *    否则图表停在几个月前的按量记录、当日用量恒为 0。无消费金额字段（套餐按积分计）。
+ * POST 类接口必须带 api-platform_ph 的 query（值在 Cookie 里带引号，取用时要剥掉），
+ * 拼装逻辑在 apiInPage / fetchViaPastedCookie 里已统一处理。
  */
 
 const API_BASE = 'https://api.xiaomimimo.com'
@@ -37,7 +54,15 @@ const EP = {
   planUsage: '/api/v1/tokenPlan/usage',
   planDetail: '/api/v1/tokenPlan/detail',
   planList: '/api/v1/tokenPlan/list',
+  models: '/api/v1/models',
+  userProfile: '/api/v1/userProfile',
+  usage: '/api/v1/usage',
+  usageDetail: '/api/v1/usage/detail/list',
+  usageTokenPlan: '/api/v1/usage/token-plan/list',
 }
+
+// 用量明细按月整取，回填近 N 个月（含当月）
+const DETAIL_MONTHS = 6
 
 function num(v: unknown): number | undefined {
   if (typeof v === 'number') return Number.isFinite(v) ? v : undefined
@@ -111,6 +136,7 @@ async function fetchViaApiKey(ctx: PluginContext, apiKey: string): Promise<Plugi
       region: 'CN',
     },
     plan: { name: planKind, currency: 'CNY' },
+    availableModels: list.map((m) => m.id).filter((x): x is string => !!x),
     notes: [
       `可用模型 ${list.length} 个：${list.slice(0, 6).map((m) => m.id).filter(Boolean).join('、')}${list.length > 6 ? ' …' : ''}`,
       '平台未提供对外计费接口，余额与套餐额度需用浏览器登录或 Cookie 模式采集',
@@ -221,11 +247,176 @@ function pickPlan(raw: unknown): { name: string; planCode?: string; price?: numb
   }
 }
 
+interface MiUsageTotals {
+  totalToken: number
+  totalCost: string
+  currentMonthCost: string
+  tpm: number
+  rpm: number
+  concurrency: number
+}
+
+// GET /api/v1/usage：历史累计口径（当前月份单独给 currentMonthCost）
+function pickUsageTotals(raw: unknown): MiUsageTotals | undefined {
+  const d = unwrap(raw) as {
+    tokenUsage?: { totalToken?: number | string }
+    costUsage?: { totalCost?: string; currentMonthCost?: string }
+    accountRateLimit?: { tpm?: number | string; rpm?: number | string; concurrency?: number | string }
+  }
+  const total = num(d.tokenUsage?.totalToken)
+  if (total === undefined && !d.costUsage) return undefined
+  return {
+    totalToken: total ?? 0,
+    totalCost: String(d.costUsage?.totalCost ?? '0'),
+    currentMonthCost: String(d.costUsage?.currentMonthCost ?? '0'),
+    tpm: num(d.accountRateLimit?.tpm) ?? 0,
+    rpm: num(d.accountRateLimit?.rpm) ?? 0,
+    concurrency: num(d.accountRateLimit?.concurrency) ?? 0,
+  }
+}
+
+interface MiUsageRow {
+  date?: string
+  model?: string
+  currency?: string
+  consumedAmount?: number | string
+  inputHitToken?: number | string
+  inputMissToken?: number | string
+  outputToken?: number | string
+  requestCount?: number | string
+}
+
+function recentMonths(n: number): Array<{ year: number; month: number }> {
+  const out: Array<{ year: number; month: number }> = []
+  const now = new Date()
+  for (let i = 0; i < n; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    out.push({ year: d.getFullYear(), month: d.getMonth() + 1 })
+  }
+  return out
+}
+
+interface MiPlanUsageRow {
+  date?: string
+  model?: string
+  totalToken?: number | string
+  inputHitToken?: number | string
+  inputMissToken?: number | string
+  outputToken?: number | string
+  requestCount?: number | string
+}
+
+// 账单明细（按量，含 CNY 消费）与 Token Plan 套餐用量（无消费金额）是两条独立数据流：
+// 日维度按计费平面分行——usage_daily 主键含 plan_name，订阅行挂主计划、按量行挂
+// 「按量付费」，才能同日并存不互相覆盖；usage_model_daily 主键无计划列，
+// 同日同模型两流先合并再落库，混合行不标平面。
+function aggregateUsage(
+  billed: MiUsageRow[],
+  planned: MiPlanUsageRow[],
+  planName: string
+): {
+  usage: PluginUsageDay[]
+  models: PluginModelUsage[]
+  window: { from: string; to: string }
+  rows: number
+  billedRows: number
+  planRows: number
+} | null {
+  const b = billed.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(String(r.date ?? '')))
+  const p = planned.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(String(r.date ?? '')))
+  if (!b.length && !p.length) return null
+
+  const dayMap = new Map<string, { date: string; billing: 'subscription' | 'payg'; hit: number; miss: number; out: number; req: number; cost: number; currency: string }>()
+  const modelMap = new Map<string, PluginModelUsage>()
+  const add = (
+    date: string,
+    model: string | undefined,
+    hit: number,
+    miss: number,
+    out: number,
+    req: number,
+    cost: number,
+    currency: string,
+    billing: 'subscription' | 'payg'
+  ) => {
+    const dkey = `${date}|${billing}`
+    const day = dayMap.get(dkey) ?? { date, billing, hit: 0, miss: 0, out: 0, req: 0, cost: 0, currency }
+    day.hit += hit
+    day.miss += miss
+    day.out += out
+    day.req += req
+    day.cost += cost
+    dayMap.set(dkey, day)
+    if (model) {
+      const key = `${date}|${model}`
+      const m = modelMap.get(key) ?? { date, modelId: model, inputTokens: 0, outputTokens: 0, cachedTokens: 0, requests: 0, billing }
+      m.inputTokens = (m.inputTokens ?? 0) + miss
+      m.cachedTokens = (m.cachedTokens ?? 0) + hit
+      m.outputTokens = (m.outputTokens ?? 0) + out
+      m.requests = (m.requests ?? 0) + req
+      if (m.billing !== billing) m.billing = undefined
+      modelMap.set(key, m)
+    }
+  }
+  for (const r of b) {
+    add(
+      String(r.date),
+      r.model,
+      num(r.inputHitToken) ?? 0,
+      num(r.inputMissToken) ?? 0,
+      num(r.outputToken) ?? 0,
+      num(r.requestCount) ?? 0,
+      num(r.consumedAmount) ?? 0,
+      r.currency || 'CNY',
+      'payg'
+    )
+  }
+  for (const r of p) {
+    add(String(r.date), r.model, num(r.inputHitToken) ?? 0, num(r.inputMissToken) ?? 0, num(r.outputToken) ?? 0, num(r.requestCount) ?? 0, 0, 'CNY', 'subscription')
+  }
+
+  const dates = [...new Set([...dayMap.values()].map((d) => d.date))].sort()
+  const today = new Date().toISOString().slice(0, 10)
+  return {
+    usage: [...dayMap.values()]
+      .sort((a, b2) => a.date.localeCompare(b2.date) || a.billing.localeCompare(b2.billing))
+      .map((d) => ({
+        date: d.date,
+        inputTokens: d.miss,
+        cachedTokens: d.hit,
+        outputTokens: d.out,
+        requests: d.req,
+        costAmount: Number(d.cost.toFixed(6)),
+        currency: d.currency,
+        planName: d.billing === 'subscription' ? planName : '按量付费',
+        billing: d.billing,
+      })),
+    models: [...modelMap.values()],
+    // 区间取「最早明细月的 1 号 → 今天」，同步时整体替换该区间旧行
+    window: { from: `${dates[0].slice(0, 7)}-01`, to: today },
+    rows: b.length + p.length,
+    billedRows: b.length,
+    planRows: p.length,
+  }
+}
+
 function assemble(parts: {
   balance?: { amount: number; currency: string }
   items: MiPlanItem[]
   plan?: ReturnType<typeof pickPlan>
   userId?: string
+  contact?: string
+  userName?: string
+  availableModels?: string[]
+  usageTotals?: MiUsageTotals
+  daily?: {
+    usage: PluginUsageDay[]
+    models: PluginModelUsage[]
+    window: { from: string; to: string }
+    rows: number
+    billedRows: number
+    planRows: number
+  }
 }): PluginFetchResult {
   const notes: string[] = []
   const res: PluginFetchResult = { notes }
@@ -256,10 +447,35 @@ function assemble(parts: {
     }
   }
 
+  if (parts.availableModels) {
+    res.availableModels = parts.availableModels
+    notes.push(`可用模型 ${parts.availableModels.length} 个（控制台 /api/v1/models）`)
+  }
+
+  if (parts.usageTotals) {
+    const t = parts.usageTotals
+    notes.push(
+      `平台历史累计：Token ${t.totalToken.toLocaleString('en-US')}，消费 ${t.totalCost} CNY，当月消费 ${t.currentMonthCost} CNY`
+    )
+    notes.push(`账号限流：TPM ${t.tpm.toLocaleString('en-US')} / RPM ${t.rpm} / 并发 ${t.concurrency}`)
+  }
+
+  if (parts.daily?.usage.length) {
+    res.usageDaily = parts.daily.usage
+    res.modelUsage = parts.daily.models
+    // 明细是整月拉取的区间快照：必须声明区间，否则每次同步按模型求和/改挂计划名后会重复累加
+    res.modelUsageWindow = parts.daily.window
+    res.usageWindow = parts.daily.window
+    notes.push(
+      `用量明细已回填 ${parts.daily.rows} 行（账单 ${parts.daily.billedRows} + Token Plan ${parts.daily.planRows}，近 ${DETAIL_MONTHS} 个月，UTC 口径，当日数据次日 07:00 UTC 校对）`
+    )
+  } else if (parts.daily) {
+    notes.push(`用量明细为空（近 ${DETAIL_MONTHS} 个月无调用记录）`)
+  }
+
   res.account = {
-    // 控制台没有可用的账户信息端点，计划名不是用户名
-    userName: 'MiMo 用户',
-    maskedContact: parts.userId ? `小米账号 ${parts.userId}` : '',
+    userName: parts.userName || 'MiMo 用户',
+    maskedContact: parts.contact ?? (parts.userId ? `小米账号 ${parts.userId}` : ''),
     region: 'CN',
   }
   return res
@@ -278,9 +494,10 @@ async function apiInPage<T>(page: import('playwright').Page, req: PageRequest): 
     async ([r]) => {
       const headers: Record<string, string> = { Accept: 'application/json' }
       if (r.body !== undefined) headers['Content-Type'] = 'application/json'
-      // 控制台把 csrf 值同时放在 cookie 与 query 上，缺 query 时部分接口 403
+      // 控制台把 csrf 值同时放在 cookie 与 query 上，缺 query 时部分接口 403。
+      // Cookie 里的值带一对双引号（"xxxx"），直接拼进 query 会被判非法 ph → 401，必须剥掉
       let url = r.path
-      const ph = /api-platform_ph=([^;]+)/.exec(document.cookie)?.[1]
+      const ph = /api-platform_ph=([^;]+)/.exec(document.cookie)?.[1]?.replace(/^"|"$/g, '')
       if (ph) url += (url.includes('?') ? '&' : '?') + 'api-platform_ph=' + encodeURIComponent(ph)
 
       const res = await fetch(url, {
@@ -320,16 +537,65 @@ async function collectFromConsole(
   const planUsage = await probe<unknown>({ path: EP.planUsage, method: 'GET', body: undefined })
   const planDetail = await probe<unknown>({ path: EP.planDetail, method: 'GET', body: undefined })
   const planList = await probe<unknown>({ path: EP.planList, method: 'GET', body: undefined })
+  const models = await probe<{ data?: Array<{ id?: string }> }>({ path: EP.models, method: 'GET', body: undefined })
+  const profile = await probe<{ data?: { userId?: string; phone?: string; email?: string; nickName?: string; userName?: string } }>({
+    path: EP.userProfile,
+    method: 'GET',
+    body: undefined,
+  })
+  const usage = await probe<unknown>({ path: EP.usage, method: 'GET', body: undefined })
+
+  // 两条用量流按月整取（账单明细 + Token Plan 套餐）；任一月份/任一流失败则整批丢弃
+  // （宁可保留旧数据，不落半套）
+  const months = recentMonths(DETAIL_MONTHS)
+  const billed: MiUsageRow[] = []
+  const planned: MiPlanUsageRow[] = []
+  let billedOk = 0
+  let planOk = 0
+  for (const { year, month } of months) {
+    const a = await probe<{ data?: MiUsageRow[] }>({ path: EP.usageDetail, method: 'POST', body: { year, month } })
+    if (a.status === 200 && Array.isArray(a.data?.data)) {
+      billedOk++
+      billed.push(...a.data.data)
+    }
+    if (authFailed) break
+    const b = await probe<{ data?: MiPlanUsageRow[] }>({ path: EP.usageTokenPlan, method: 'POST', body: { year, month } })
+    if (b.status === 200 && Array.isArray(b.data?.data)) {
+      planOk++
+      planned.push(...b.data.data)
+    }
+    if (authFailed) break
+  }
 
   const plan = pickPlan(planDetail.data)
   const priced = plan ? { ...plan, price: pickPriceForPlan(planList.data, plan.planCode)?.price ?? plan.price } : undefined
+  const pf = profile.data?.data
   const result = assemble({
     balance: pickBalance(bal.data),
     items: pickPlanItems(planUsage.data),
     plan: priced,
+    userId: pf?.userId,
+    contact: pf?.phone || pf?.email || undefined,
+    userName: pf?.userName || pf?.nickName || undefined,
+    // 控制台模型 id 带厂商前缀（xiaomi/…），用量明细与价目表用的是裸名，去掉前缀对齐并去重
+    availableModels:
+      models.status === 200
+        ? [
+            ...new Set(
+              (models.data?.data ?? [])
+                .map((m) => (m.id ?? '').split('/').pop() ?? '')
+                .filter((x): x is string => !!x)
+            ),
+          ]
+        : undefined,
+    usageTotals: usage.status === 200 ? pickUsageTotals(usage.data) : undefined,
+    daily:
+      billedOk === months.length && planOk === months.length
+        ? aggregateUsage(billed, planned, plan?.name ?? 'Standard') ?? { usage: [], models: [], window: { from: '', to: '' }, rows: 0, billedRows: 0, planRows: 0 }
+        : undefined,
   })
   result.notes?.push(
-    `控制台状态：balance ${bal.status}、planUsage ${planUsage.status}、planDetail ${planDetail.status}、planList ${planList.status}` +
+    `控制台状态：balance ${bal.status}、planUsage ${planUsage.status}、planDetail ${planDetail.status}、planList ${planList.status}、models ${models.status}、userProfile ${profile.status}、usage ${usage.status}、usageDetail 账单 ${billedOk}/${DETAIL_MONTHS} 月 + 套餐 ${planOk}/${DETAIL_MONTHS} 月` +
       (authFailed ? '；已中断后续请求（SPA 全局登出会清空 Cookie）' : '')
   )
   return { result, authFailed }
@@ -391,7 +657,8 @@ async function fetchViaPastedCookie(ctx: PluginContext, cookie: string): Promise
 }
 
 function csrfOf(cookie: string): string {
-  return /api-platform_ph=([^;]+)/.exec(cookie)?.[1] ?? ''
+  // Cookie 原文里的 ph 值带双引号，剥掉后再进 query
+  return /api-platform_ph=([^;]+)/.exec(cookie)?.[1]?.replace(/^"|"$/g, '') ?? ''
 }
 
 // ---------- 插件入口 ----------
@@ -426,17 +693,13 @@ export const xiaomimoPlugin: ProviderPlugin = {
 
   async login(ctx: PluginContext): Promise<PluginLoginResult> {
     const pw = await importPlaywright(ctx)
-    const dir = ensureProfileDir(ctx.dataDir, ctx.providerId)
 
     // 先释放可能正被无头保活实例占用的 profile：两个 Chromium 同开一个 user-data-dir，
     // 后写入的一方会把对方的 Cookie 冲掉，登录态就是这么丢的
     await closeSession(ctx.providerId).catch(() => {})
 
-    const context = await pw.chromium.launchPersistentContext(dir, {
-      headless: false,
-      viewport: null,
-      args: ['--start-maximized'],
-    })
+    // 本机 Chrome 打开（未装则回退内置 Chromium）；独立持久 profile，登录一次后快照+保活复用
+    const context = await launchLoginWindow(pw, ctx.dataDir, ctx.providerId)
 
     try {
       const page = context.pages()[0] ?? (await context.newPage())

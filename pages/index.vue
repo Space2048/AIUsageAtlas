@@ -90,20 +90,21 @@ function pctColor(p: number): string {
   return '#2fa36b'
 }
 
+// 配额窗口的真实用量数字：采到才显示，口径随 unit（credits 千分位整数，usd 货币符号）；
+// 上限为 0/缺失说明该额度桶没分配额度，不显示「0 / 0」这种噪音
+function quotaValues(w: { usedValue: number | null; limitValue: number | null; unit: string }): string {
+  const fmt = (n: number) => (w.unit === 'usd' ? fmtCost(n, 'USD') : Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2))
+  if (w.limitValue !== null && w.limitValue > 0 && w.usedValue !== null) return `${fmt(w.usedValue)} / ${fmt(w.limitValue)}`
+  if (w.usedValue !== null && w.usedValue > 0) return `已用 ${fmt(w.usedValue)}`
+  return ''
+}
+
 function maxHistory(p: ProviderVM): number {
   return Math.max(1, ...p.history.map((h) => h.tokens))
 }
 
-function categoryLabel(c: string): string {
-  return c === 'subscription' ? '订阅' : c === 'api' ? 'API' : '聚合'
-}
-
 function authKindLabel(k: string): string {
   return k === 'apikey' ? 'API Key' : k === 'cookie' ? 'Cookie' : '浏览器登录'
-}
-
-function categoryBadge(c: string): string {
-  return c === 'subscription' ? 'badge-sub' : c === 'api' ? 'badge-api' : 'badge-agg'
 }
 
 function relTime(iso: string): string {
@@ -285,10 +286,7 @@ onBeforeUnmount(() => {
             <div class="pc-head">
               <ProviderIcon :icon="p.icon" :seed="p.id" :name="p.displayName" :text="p.displayName.slice(0, 2).toUpperCase()" />
               <div class="pc-title">
-                <div class="pc-name">
-                  {{ p.displayName }}
-                  <span class="badge" :class="categoryBadge(p.category)">{{ categoryLabel(p.category) }}</span>
-                </div>
+                <div class="pc-name">{{ p.displayName }}</div>
                 <div class="pc-account">{{ p.account.userName }}<template v-if="p.account.maskedContact"> · {{ p.account.maskedContact }}</template></div>
               </div>
             </div>
@@ -297,7 +295,8 @@ onBeforeUnmount(() => {
               <div class="pc-plan-info">
                 <div class="pc-plan-name">{{ p.plan.name }}</div>
                 <div class="pc-plan-meta">
-                  <template v-if="p.plan.price > 0">{{ p.plan.currency === 'USD' ? '$' : '¥' }}{{ p.plan.price }}<b>/期</b></template>
+                  <span v-if="(p.plan.unknownFields ?? []).includes('price')" class="unknown-val">价格未获取到</span>
+                  <template v-else-if="p.plan.price > 0">{{ p.plan.currency === 'USD' ? '$' : '¥' }}{{ p.plan.price }}<b>/期</b></template>
                   <template v-else>免费/按量</template>
                   <span v-if="p.plan.autoRenew"> · 自动续费</span>
                 </div>
@@ -321,7 +320,10 @@ onBeforeUnmount(() => {
                   <div class="quota-bar">
                     <div class="quota-bar-fill" :style="{ width: Math.min(100, w.usedPct) + '%', background: pctColor(w.usedPct) }" />
                   </div>
-                  <div class="quota-reset">{{ countdown(w.resetAt) }}</div>
+                  <div class="quota-sub">
+                    <span class="quota-values">{{ quotaValues(w) }}</span>
+                    <span class="quota-reset">{{ countdown(w.resetAt) }}</span>
+                  </div>
                 </div>
               </template>
               <div v-else class="quota-empty">该渠道 API 未提供配额窗口数据</div>

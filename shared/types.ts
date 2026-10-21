@@ -18,6 +18,9 @@ export interface UsageDay {
   tokens: number
   costAmount: number
   currency: string
+  // 计费平面拆分：平台数据能区分订阅套餐与按量时才有值，缺省=未拆分（按中性色整柱显示）
+  subscriptionTokens?: number
+  paygTokens?: number
 }
 
 export interface ProviderVM {
@@ -38,6 +41,8 @@ export interface ProviderVM {
     currency: string
     renewalDate: string | null
     autoRenew: boolean
+    // 平台不提供/采集不到的字段名（price|renewalDate|autoRenew），前端红色标「未获取到」
+    unknownFields: string[]
   }
   balance: { amount: number; currency: string } | null
   windows: QuotaWindow[]
@@ -77,6 +82,9 @@ export interface PluginMeta {
   cookieGuide?: CookieGuide
 }
 
+// 计费平面：订阅套餐（Code Plan / Go 等）与按量 API 分开统计与展示
+export type UsageBilling = 'subscription' | 'payg'
+
 export interface ModelUsageRow {
   modelId: string
   tokens: number
@@ -85,6 +93,7 @@ export interface ModelUsageRow {
   inputPerM: number | null
   outputPerM: number | null
   currency: string | null
+  billing: UsageBilling | null
 }
 
 export interface SyncLogRow {
@@ -103,11 +112,12 @@ export interface ProviderDetail {
   icon: string
   category: ProviderCategory
   account: { userName: string; maskedContact: string; region: string }
-  plan: { name: string; price: number; currency: string; renewalDate: string | null; autoRenew: boolean }
+  plan: { name: string; price: number; currency: string; renewalDate: string | null; autoRenew: boolean; unknownFields: string[] }
   balance: { amount: number; currency: string } | null
   windows: QuotaWindow[]
   usage30d: UsageDay[]
   modelUsage: ModelUsageRow[]
+  availableModels: string[]
   syncLogs: SyncLogRow[]
   sync: { enabled: boolean; intervalSec: number }
   authKinds: AuthKind[]

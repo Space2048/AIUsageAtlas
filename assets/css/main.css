@@ -66,10 +66,10 @@ html, body {
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark {
   width: 36px; height: 36px;
-  border-radius: 12px;
-  background: linear-gradient(140deg, #ff9a6c, #f4643c);
-  display: grid; place-items: center;
-  font-weight: 800; font-size: 16px; color: #fff;
+  display: block;
+  flex-shrink: 0;
+  /* 与 icon.svg 的 rx=112/512 同比例，阴影随圆角走 */
+  border-radius: 8px;
   box-shadow: 0 4px 12px rgba(244, 100, 60, 0.35);
 }
 .brand-title { font-size: 16.5px; font-weight: 750; letter-spacing: 0.1px; }
@@ -209,6 +209,9 @@ html, body {
 .quota-bar { height: 8px; background: var(--bg-sunken); border-radius: 6px; overflow: hidden; margin-top: 7px; }
 .quota-bar-fill { height: 100%; border-radius: 6px; transition: width 0.5s ease; }
 .quota-reset { font-size: 11px; color: var(--text-faint); margin-top: 5px; font-variant-numeric: tabular-nums; }
+.quota-sub { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-top: 5px; }
+.quota-sub .quota-reset { margin-top: 0; }
+.quota-values { font-size: 11.5px; font-weight: 650; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 底部 */
 .pc-foot { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--border); padding-top: 13px; }
@@ -408,9 +411,14 @@ html, body {
   min-height: 3px;
   position: relative;
   transition: background 0.15s ease;
+  display: flex; flex-direction: column; overflow: hidden;
 }
+.chart-seg { width: 100%; }
 .chart-col:hover { background: #ffd9c6; }
 .chart-col.today { background: linear-gradient(180deg, #ff9a6c, #f4643c); }
+/* 拆分柱由色块占满，今日改用描边标识 */
+.chart-col.stacked.today { box-shadow: inset 0 0 0 2px rgba(244, 100, 60, 0.6); }
+.legend-today { background: #f1eee7; box-shadow: inset 0 0 0 2px rgba(244, 100, 60, 0.6); }
 .chart-labels { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-faint); margin-top: 8px; }
 .chart-legend { display: flex; gap: 18px; margin-bottom: 14px; }
 .legend-item { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
@@ -424,6 +432,10 @@ html, body {
   white-space: nowrap;
 }
 .model-table td { padding: 11px 10px; border-bottom: 1px dashed var(--border); vertical-align: middle; }
+.model-table tr.model-group-row td {
+  font-size: 11.5px; font-weight: 720; color: var(--text-faint);
+  padding: 14px 10px 3px; border-bottom: none; letter-spacing: 0.02em;
+}
 .model-table tr:last-child td { border-bottom: none; }
 .model-name { font-weight: 650; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 .model-share { display: flex; align-items: center; gap: 8px; min-width: 130px; }
@@ -431,6 +443,23 @@ html, body {
 .model-share-fill { height: 100%; background: var(--accent); border-radius: 4px; }
 .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .muted { color: var(--text-faint); font-size: 12px; }
+/* 平台不提供/采集不到的字段：红色明示，不用默认值冒充 */
+.unknown-val { color: var(--red); font-weight: 650; }
+
+/* 可用模型列表 */
+.model-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.model-chip {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; font-weight: 550; text-align: left;
+  padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  background: var(--bg-sunken); border: 1px solid var(--border-bright);
+  color: var(--text); white-space: nowrap;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.model-chip:hover { border-color: var(--accent); color: var(--accent); }
+.model-chip.copied { background: var(--green-soft); border-color: var(--green); color: var(--green); }
+.model-chip.failed { background: var(--red-soft); border-color: var(--red); color: var(--red); }
 
 /* 同步日志 */
 .log-list { display: flex; flex-direction: column; gap: 0; }

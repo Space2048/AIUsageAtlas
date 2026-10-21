@@ -30,9 +30,9 @@ export default defineEventHandler((): DashboardData => {
       .get(p.id) as { user_name: string; masked_contact: string; region: string } | undefined
 
     const subs = db
-      .prepare(`SELECT plan_name, price, currency, renewal_date, auto_renew FROM subscription WHERE provider_id = ?`)
-      .all(p.id) as Array<{ plan_name: string; price: number; currency: string; renewal_date: string | null; auto_renew: number }>
-    const plan = subs[0] ?? { plan_name: '未知计划', price: 0, currency: 'CNY', renewal_date: null, auto_renew: 0 }
+      .prepare(`SELECT plan_name, price, currency, renewal_date, auto_renew, unknown_fields FROM subscription WHERE provider_id = ?`)
+      .all(p.id) as Array<{ plan_name: string; price: number | null; currency: string; renewal_date: string | null; auto_renew: number | null; unknown_fields: string | null }>
+    const plan = subs[0] ?? { plan_name: '未知计划', price: 0, currency: 'CNY', renewal_date: null, auto_renew: 0, unknown_fields: '' }
 
     const windowRows = db
       .prepare(`SELECT plan_name, name, used_pct, used_value, limit_value, unit, reset_at, extra_usage_enabled FROM quota_window WHERE provider_id = ?`)
@@ -75,8 +75,13 @@ export default defineEventHandler((): DashboardData => {
       )
       .get(p.id, today) as DayAgg | undefined
 
+    // sync_log.started_at 由 datetime('now') 写入，是无时区标记的 UTC 串；
+    // 前端 new Date() 会把它当本地时间解析，必须在此转成带 Z 的 ISO 8601
     const lastSync = db
-      .prepare(`SELECT started_at, status FROM sync_log WHERE provider_id = ? ORDER BY id DESC LIMIT 1`)
+      .prepare(
+        `SELECT COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', started_at), started_at) AS started_at, status
+         FROM sync_log WHERE provider_id = ? ORDER BY id DESC LIMIT 1`
+      )
       .get(p.id) as { started_at: string; status: string } | undefined
 
     return {
@@ -93,10 +98,11 @@ export default defineEventHandler((): DashboardData => {
       },
       plan: {
         name: plan.plan_name,
-        price: plan.price,
+        price: plan.price ?? 0,
         currency: plan.currency,
         renewalDate: plan.renewal_date,
         autoRenew: !!plan.auto_renew,
+        unknownFields: (plan.unknown_fields ?? '').split(',').filter(Boolean),
       },
       balance: balance ? { amount: balance.balance, currency: balance.currency } : null,
       windows,

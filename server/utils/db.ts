@@ -13,9 +13,24 @@ export function getDb(): DatabaseSync {
   db.exec('PRAGMA journal_mode = WAL;')
   migrate(db)
   applyOfficialPrices(db)
-  // 轻量列迁移：老库补 icon 列
+  // 轻量列迁移：老库补 icon 列 / 模型用量补计费平面列
   try {
     db.exec(`ALTER TABLE provider ADD COLUMN icon TEXT DEFAULT ''`)
+  } catch {
+    /* 列已存在 */
+  }
+  try {
+    db.exec(`ALTER TABLE usage_model_daily ADD COLUMN billing TEXT`)
+  } catch {
+    /* 列已存在 */
+  }
+  try {
+    db.exec(`ALTER TABLE usage_daily ADD COLUMN billing TEXT`)
+  } catch {
+    /* 列已存在 */
+  }
+  try {
+    db.exec(`ALTER TABLE subscription ADD COLUMN unknown_fields TEXT DEFAULT ''`)
   } catch {
     /* 列已存在 */
   }
@@ -99,6 +114,12 @@ function migrate(d: DatabaseSync) {
     currency TEXT DEFAULT 'CNY',
     recharged_amount REAL DEFAULT 0,
     PRIMARY KEY (provider_id, date)
+  );
+  CREATE TABLE IF NOT EXISTS available_model (
+    provider_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider_id, model_id)
   );
   CREATE TABLE IF NOT EXISTS credential (
     provider_id TEXT NOT NULL,

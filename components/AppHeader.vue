@@ -1,7 +1,7 @@
 <template>
   <header class="topbar">
     <NuxtLink to="/" class="brand">
-      <div class="brand-mark">A</div>
+      <img class="brand-mark" src="/icon.svg" alt="" width="36" height="36">
       <div>
         <div class="brand-title">AIUsageAtlas</div>
         <div class="brand-sub">AI 供应商额度与用量聚合</div>
