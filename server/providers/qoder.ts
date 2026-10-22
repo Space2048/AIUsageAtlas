@@ -8,7 +8,15 @@ import {
   isPageAlive,
   runInteractiveLogin,
 } from '~~/server/utils/browser-session'
-import { PluginError, type PluginContext, type PluginFetchResult, type ProviderPlugin } from './types'
+import {
+  PluginError,
+  type PluginContext,
+  type PluginFetchResult,
+  type PluginModelUsage,
+  type PluginUsageDay,
+  type PluginWindow,
+  type ProviderPlugin,
+} from './types'
 
 /**
  * Qoder 插件（阿里 Qoder 智能编程 IDE，qoder.com）
@@ -93,6 +101,140 @@ async function ensureSession(ctx: PluginContext): Promise<import('playwright').P
   return page
 }
 
+/**
+ * 用量采集（/account/usage 页三个接口，2026-10-22 会话实测）：
+ * 1) /api/v2/me/usages/big_model_credits —— plan_quota.quota_summary（订阅额度 used/limit/percentage）
+ *    + resource_package_quota.quota_summary（资源包额度）
+ * 2) /api/v1/me/cost-center/credits/daily-trend?userId=&startTime=&endTime=&groupBy=all
+ *    —— trend[]: {date, credits, referenceCost, messageCount}（近30天每日 Credits）
+ * 3) /api/v1/me/usages/big_model_credits/histories?... —— data[]: {time(ms), credits, cost,
+ *    model_category, operation}（每次调用，模型维度）
+ * credits 是该平台的消耗单位（非 token），usage_daily 的 input_tokens 列记 credits 值。
+ */
+async function collectUsage(
+  page: import('playwright').Page,
+  site: { consoleUrl: string },
+  userId: string,
+  planEndMs: number | undefined,
+  res: PluginFetchResult,
+  notes: string[]
+) {
+  const join = (p: string) => siteJoin(site.consoleUrl, p)
+
+  // ---- 额度窗口 ----
+  const quota = await fetchInPageJson(page, join('/api/v2/me/usages/big_model_credits'))
+  const windows: PluginWindow[] = []
+  if (quota.status === 200 && quota.data && typeof quota.data === 'object') {
+    const planSum = deepFind((quota.data as Record<string, unknown>).plan_quota, ['quota_summary'])
+    const pkgSum = deepFind((quota.data as Record<string, unknown>).resource_package_quota, ['quota_summary'])
+    if (planSum && typeof planSum === 'object') {
+      const s = planSum as Record<string, unknown>
+      windows.push({
+        name: '订阅 Credits',
+        usedPct: Math.min(100, Math.max(0, num(s.usage_percentage) ?? 0)),
+        usedValue: num(s.used_value) ?? 0,
+        limitValue: num(s.limit_value) ?? 0,
+        unit: 'credits',
+        resetAt: planEndMs ? new Date(planEndMs).toISOString() : null,
+      })
+    }
+    if (pkgSum && typeof pkgSum === 'object') {
+      const s = pkgSum as Record<string, unknown>
+      windows.push({
+        name: '资源包 Credits',
+        usedPct: Math.min(100, Math.max(0, num(s.usage_percentage) ?? 0)),
+        usedValue: num(s.used_value) ?? 0,
+        limitValue: num(s.limit_value) ?? 0,
+        unit: 'credits',
+        resetAt: null,
+      })
+    }
+    if (windows.length) {
+      res.windows = windows
+      notes.push(`额度：${windows.map((w) => `${w.name} ${w.usedValue}/${w.limitValue}`).join('，')}`)
+    }
+  } else {
+    notes.push(`big_model_credits 额度未取得（HTTP ${quota.status}）：${quota.text.slice(0, 120)}`)
+  }
+
+  // ---- 每日 Credits 趋势 → usage_daily（近30天） ----
+  const nowMs = Date.now()
+  const startMs = nowMs - 30 * 86400_000
+  const trend = await fetchInPageJson(
+    page,
+    join(`/api/v1/me/cost-center/credits/daily-trend?userId=${userId}&startTime=${startMs}&endTime=${nowMs}&groupBy=all`)
+  )
+  let usageRows: PluginUsageDay[] = []
+  if (trend.status === 200 && trend.data && typeof trend.data === 'object') {
+    const arr = deepFind(trend.data, ['trend'])
+    if (Array.isArray(arr)) {
+      usageRows = arr
+        .map((t) => {
+          const r = t as Record<string, unknown>
+          return {
+            date: String(r.date ?? '').slice(0, 10),
+            // credits 是消耗单位（非 token）：记在 input_tokens 列供图表展示
+            inputTokens: num(r.credits) ?? 0,
+            outputTokens: 0,
+            cachedTokens: 0,
+            requests: num(r.messageCount) ?? 0,
+            costAmount: num(r.referenceCost) ?? 0,
+            currency: 'CNY',
+            billing: 'subscription' as const,
+          }
+        })
+        .filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date))
+      const totalCredits = arr.reduce((a, r) => a + (num((r as Record<string, unknown>).credits) ?? 0), 0)
+      notes.push(`每日 Credits 趋势 ${usageRows.length} 天，合计 ${totalCredits.toFixed(1)}`)
+    }
+  } else {
+    notes.push(`daily-trend 未取得（HTTP ${trend.status}）：${trend.text.slice(0, 120)}`)
+  }
+
+  // ---- 调用历史 → usage_model_daily（模型维度） ----
+  const modelMap = new Map<string, PluginModelUsage>()
+  let histTotal = 0
+  let page1: unknown[] = []
+  for (let p = 1; p <= 5; p++) {
+    const hist = await fetchInPageJson(
+      page,
+      join(`/api/v1/me/usages/big_model_credits/histories?page=${p}&page_size=100&start_time=${startMs}&end_time=${nowMs}&order_by=begin_at&order=-1`)
+    )
+    if (hist.status !== 200 || !hist.data || typeof hist.data !== 'object') {
+      if (p === 1) notes.push(`histories 未取得（HTTP ${hist.status}）：${hist.text.slice(0, 120)}`)
+      break
+    }
+    const rows = deepFind(hist.data, ['data'])
+    const batch = Array.isArray(rows) ? rows : []
+    page1.push(...batch)
+    if (batch.length < 100) break
+  }
+  for (const row of page1) {
+    const r = row as Record<string, unknown>
+    const date = new Date(num(r.time) ?? 0).toISOString().slice(0, 10)
+    const model = String(r.model_category ?? r.model ?? 'unknown')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
+    const key = `${date}|${model}`
+    const m = modelMap.get(key) ?? { date, modelId: model, inputTokens: 0, outputTokens: 0, cachedTokens: 0, requests: 0, billing: 'subscription' as const }
+    m.inputTokens = (m.inputTokens ?? 0) + (num(r.credits) ?? 0)
+    m.requests = (m.requests ?? 0) + 1
+    modelMap.set(key, m)
+    histTotal++
+  }
+  if (modelMap.size) {
+    res.modelUsage = [...modelMap.values()]
+    const dates = [...modelMap.values()].map((m) => m.date).sort()
+    res.modelUsageWindow = { from: dates[0], to: dates.at(-1)! }
+    notes.push(`调用历史 ${histTotal} 条 / ${modelMap.size} 行模型明细（credits 记为 tokens 列）`)
+  }
+
+  if (usageRows.length) {
+    const dates = usageRows.map((u) => u.date).sort()
+    res.usageDaily = usageRows
+    res.usageWindow = { from: dates[0], to: dates.at(-1)! }
+  }
+}
+
 async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
   const page = await ensureSession(ctx)
   const notes: string[] = []
@@ -150,6 +292,14 @@ async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
     const credits = deepFind(up.data, ['credits', 'credit', 'balance', 'quota', 'remaining'])
     if (credits !== undefined) notes.push(`检测到额度字段：${String(credits).slice(0, 40)}（结构待核对后接入配额窗口）`)
     notes.push(`套餐接口样例：${up.text.slice(0, 300)}`)
+
+    // 用量明细（/account/usage 页三个接口，2026-10-22 实测）：
+    // 1) big_model_credits —— plan_quota（订阅额度）+ resource_package_quota（资源包）
+    // 2) daily-trend —— 每日 Credits 消耗趋势（近30天）
+    // 3) histories —— 每次调用明细（模型维度、credits、cost）
+    const uid = String(deepFind(up.data, ['user_id', 'userId']) ?? '')
+    const planEnd = num(deepFind(up.data, ['end_date', 'next_refresh_date']))
+    await collectUsage(page, siteOf(ctx), uid, planEnd, res, notes)
   } else {
     res.plan = { name: 'Qoder', currency: site.currency, unknownFields: ['price', 'renewalDate', 'autoRenew'] }
     notes.push(`/userplan 未取得（HTTP ${up.status}）：${up.text.slice(0, 120)}`)
@@ -164,13 +314,14 @@ async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
   // 多页面导航 + 双通道采样（按本实例站点）：
   // 1) 客户端 API 流量（若有）→ 接口路径清单
   // 2) 页面可见文本（Next.js 服务端渲染的用量数字可能不走客户端 API）→ 渲染值样例
+  // /account/usage = 用量明细页（2026-10-22 实测：订阅资源 251/300、个人资源包 0/800、
+  // Credits 日消耗热力图都在这页），/account/bill = 我的账单
   const site = siteOf(ctx)
   const traffic = captureApiTraffic(page)
   const textSamples: string[] = []
-  // qoder.cn 没有 /plan 路由（实测404），首页即登录后的工作台，单页采样足够
-  for (const route of ['/']) {
+  for (const route of ['/account/usage', '/account/bill', '/']) {
     await page.goto(siteJoin(site.consoleUrl, route), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {})
-    await page.waitForTimeout(5000)
+    await page.waitForTimeout(6000)
     const text = await page
       .evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 400))
       .catch(() => '')

@@ -1,3 +1,4 @@
+import type { BrowserContext } from 'playwright'
 import type { AuthKind } from '~~/shared/types'
 
 export interface PluginContext {
@@ -156,5 +157,12 @@ export interface ProviderPlugin {
   sites?: Array<{ id: string; label: string; consoleUrl: string; currency?: string }>
   // 交互式登录（打开真实浏览器让用户登录，持久化会话）
   login?(ctx: PluginContext): Promise<PluginLoginResult>
+  /**
+   * 会话页加载前的预处理（浏览器登录型渠道用）：在 goto 控制台之前先纯 HTTP 用
+   * 长效凭据（如 MiMo 的 passToken）换发新的短效 serviceToken，避免过期快照让
+   * 控制台 SPA 一加载就 401 全局登出、连带服务端吊销整个 passport 会话链。
+   * 失败不阻断加载（换发原因记下来，交给后续采集路径报错）。
+   */
+  preNavigate?(context: BrowserContext, opts: { dataDir: string; providerId: string; log?: (m: string) => void }): Promise<void>
   fetch(ctx: PluginContext, cred: CredentialPayload): Promise<PluginFetchResult>
 }

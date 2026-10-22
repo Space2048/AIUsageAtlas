@@ -29,7 +29,10 @@ export default defineEventHandler(async (event) => {
   }
 
   const id = `${body.pluginId}-${Date.now().toString(36)}`
-  db.prepare(`INSERT INTO provider (id, plugin_id, display_name, category, icon, console_url) VALUES (?, ?, ?, 'api', ?, ?)`).run(
+  db.prepare(
+    `INSERT INTO provider (id, plugin_id, display_name, category, icon, console_url, sort_order)
+     VALUES (?, ?, ?, 'api', ?, ?, COALESCE((SELECT MAX(sort_order) FROM provider), 0) + 1)`
+  ).run(
     id,
     body.pluginId,
     body.displayName || plugin?.displayName || body.pluginId,

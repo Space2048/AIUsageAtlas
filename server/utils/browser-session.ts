@@ -85,6 +85,9 @@ async function createSession(providerId: string, dataDir: string, consoleUrl: st
   const context = await pw.chromium.launchPersistentContext(dir, {
     headless: true,
     viewport: { width: 1280, height: 800 },
+    // 与登录窗口保持一致关掉 AutomationControlled：静默换发会经停 passport，
+    // navigator.webdriver=true 会被风控拦下（见 launchLoginWindow 注释）
+    args: ['--disable-blink-features=AutomationControlled'],
   })
   await restoreStoredState(context, dataDir, providerId, consoleUrl)
   const session: Session = { context, page: null, consoleUrl }
@@ -116,12 +119,32 @@ export async function launchLoginWindow(pw: typeof import('playwright'), dataDir
   }
 }
 
+// 插件的预换发钩子：会话页【加载之前】以纯 HTTP 用长效凭据换新短效 token。
+// 必须在 goto 之前——过期快照让控制台 SPA 一加载就 401，而 SPA 的全局登出
+// 会连带服务端吊销长效凭据（MiMo 实测 passToken 被吊销即无法自救），窗口只有一次
+export type PreNavigate = (
+  context: BrowserContext,
+  opts: { dataDir: string; providerId: string; log?: (m: string) => void }
+) => Promise<void>
+
 // 取得（并首次加载）保活页面；已加载过的页面绝不重复导航
-export async function ensureLivePage(providerId: string, dataDir: string, consoleUrl: string): Promise<Page> {
+export async function ensureLivePage(
+  providerId: string,
+  dataDir: string,
+  consoleUrl: string,
+  opts?: { preNavigate?: PreNavigate; log?: (m: string) => void }
+): Promise<Page> {
   let session = sessions.get(providerId)
   if (!session) session = await createSession(providerId, dataDir, consoleUrl)
 
   if (session.page && !session.page.isClosed()) return session.page
+
+  // 首次/重建加载前预换发（纯 HTTP，页面还没机会发起 401）。
+  // 换发失败必须【阻断 goto】并向上抛：带着过期 token 加载页面必然 401→
+  // 全局登出，甚至服务端吊销长效凭据（见 PreNavigate 注释），宁可本次操作失败
+  if (opts?.preNavigate) {
+    await opts.preNavigate(session.context, { dataDir, providerId, log: opts.log })
+  }
 
   const page = session.context.pages()[0] ?? (await session.context.newPage())
   await page.goto(consoleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
@@ -137,8 +160,13 @@ export function isPageAlive(providerId: string): boolean {
   return !!s?.page && !s.page.isClosed()
 }
 
-export async function startKeepAlive(providerId: string, dataDir: string, consoleUrl: string) {
-  await ensureLivePage(providerId, dataDir, consoleUrl)
+export async function startKeepAlive(
+  providerId: string,
+  dataDir: string,
+  consoleUrl: string,
+  opts?: { preNavigate?: PreNavigate; log?: (m: string) => void }
+) {
+  await ensureLivePage(providerId, dataDir, consoleUrl, opts)
 }
 
 export function hasSession(providerId: string): boolean {
@@ -159,14 +187,18 @@ export async function closeAllSessions() {
   }
 }
 
-// 服务重启后恢复：为所有已登录的供应商重新挂上保活
+// 服务重启后恢复：为所有已登录的供应商重新挂上保活（重启是预换发的关键入口——
+// 快照里的短效 token 大概率已过期，不换发就会 401→全局登出→吊销长效凭据）
 export async function restoreKeepAlive(
   dataDir: string,
-  providers: Array<{ id: string; consoleUrl: string }>
+  providers: Array<{ id: string; consoleUrl: string; preNavigate?: PreNavigate }>
 ) {
   for (const p of providers) {
     if (isLoggedIn(dataDir, p.id)) {
-      await startKeepAlive(p.id, dataDir, p.consoleUrl).catch(() => {})
+      await startKeepAlive(p.id, dataDir, p.consoleUrl, {
+        preNavigate: p.preNavigate,
+        log: (m) => console.log(`[keepalive ${p.id}] ${m}`),
+      }).catch(() => {})
     }
   }
 }

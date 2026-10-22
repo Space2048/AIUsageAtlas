@@ -39,6 +39,14 @@ export function getDb(): DatabaseSync {
   } catch {
     /* 列已存在 */
   }
+  try {
+    db.exec(`ALTER TABLE provider ADD COLUMN sort_order INTEGER DEFAULT 0`)
+    // 老库补列后全是 0，按 rowid 回填成插入顺序，避免升级把用户已有的卡片顺序打乱；
+    // 之后新建的供应商由 providers.post.ts 显式写 MAX+1，不会停在 0
+    db.exec(`UPDATE provider SET sort_order = rowid WHERE sort_order = 0`)
+  } catch {
+    /* 列已存在 */
+  }
   return db
 }
 

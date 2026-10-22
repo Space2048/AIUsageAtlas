@@ -37,9 +37,9 @@ export default defineNitroPlugin((nitroApp) => {
       .map((r) => {
         const plugin = listPlugins().find((p) => p.id === r.plugin_id)
         const url = r.console_url || plugin?.consoleUrl
-        return url ? { id: r.id, consoleUrl: url } : null
+        return url ? { id: r.id, consoleUrl: url, preNavigate: plugin?.preNavigate } : null
       })
-      .filter((x): x is { id: string; consoleUrl: string } => !!x)
+      .filter((x): x is NonNullable<typeof x> => !!x)
     if (providers.length) void restoreKeepAlive(dataDir, providers)
   }
 

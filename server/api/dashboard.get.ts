@@ -21,7 +21,7 @@ export default defineEventHandler((): DashboardData => {
   const today = utcDay()
 
   const providerRows = db
-    .prepare(`SELECT id, plugin_id, display_name, category, icon FROM provider ORDER BY rowid`)
+    .prepare(`SELECT id, plugin_id, display_name, category, icon FROM provider ORDER BY sort_order, rowid`)
     .all() as Array<{ id: string; plugin_id: string; display_name: string; category: string; icon: string | null }>
 
   const providers: ProviderVM[] = providerRows.map((p) => {

@@ -44,6 +44,66 @@ function showToast(msg: string) {
   setTimeout(() => (toast.value = ''), 2200)
 }
 
+// ---------- 卡片排序 ----------
+// 拖拽手柄在卡片内，而不是整卡 draggable：卡片本身是链接，整卡可拖会抢掉点击跳转
+const draggingId = ref<string | null>(null)
+
+function startDrag(id: string, e: DragEvent) {
+  draggingId.value = id
+  e.dataTransfer?.setData('text/plain', id)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function dragTo(id: string, e: DragEvent) {
+  const from = draggingId.value
+  if (!from || !data.value || from === id) return
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  const list = data.value.providers
+  const i = list.findIndex((p) => p.id === from)
+  const j = list.findIndex((p) => p.id === id)
+  if (i < 0 || j < 0) return
+
+  // 只有越过目标卡片中线才换位：否则指针停在两卡交界处会来回抖动
+  const rect = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+  if (rect) {
+    const pastCenter = e.clientX > rect.left + rect.width / 2
+    if (j > i && !pastCenter) return
+    if (j < i && pastCenter) return
+  }
+
+  // 拖拽过程中就地换位，松手才落库，界面才跟手
+  list.splice(j, 0, ...list.splice(i, 1))
+}
+
+async function endDrag() {
+  if (!draggingId.value) return
+  draggingId.value = null
+  await persistOrder()
+}
+
+async function persistOrder() {
+  if (!data.value) return
+  const ids = data.value.providers.map((p) => p.id)
+  try {
+    await $fetch('/api/providers/order', { method: 'PATCH', body: { ids } })
+  } catch {
+    await load().catch(() => {}) // 存不下就回到服务端真相，别让界面留着假顺序
+    showToast('顺序保存失败，已还原')
+  }
+}
+
+// 键盘排序：手柄聚焦后用 ↑/↓ 移动，不依赖鼠标
+function keyMove(id: string, dir: -1 | 1, e: KeyboardEvent) {
+  if (!data.value) return
+  e.preventDefault()
+  const list = data.value.providers
+  const i = list.findIndex((p) => p.id === id)
+  const j = i + dir
+  if (i < 0 || j < 0 || j >= list.length) return
+  ;[list[i], list[j]] = [list[j], list[i]]
+  void persistOrder()
+}
+
 function fmtTokens(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -287,14 +347,42 @@ onBeforeUnmount(() => {
           还没有供应商，点击右上角「添加供应商」接入第一个渠道
         </div>
 
-        <div class="provider-grid">
-          <NuxtLink v-for="p in data.providers" :key="p.id" :to="`/providers/${p.id}`" class="provider-card">
+        <TransitionGroup
+          name="card-sort"
+          tag="div"
+          class="provider-grid"
+          :class="{ 'is-sorting': !!draggingId }"
+        >
+          <NuxtLink
+            v-for="p in data.providers"
+            :key="p.id"
+            :to="`/providers/${p.id}`"
+            class="provider-card"
+            :class="{ 'is-dragging': draggingId === p.id }"
+            @dragover.prevent="dragTo(p.id, $event)"
+            @drop.prevent="endDrag"
+          >
             <div class="pc-head">
               <ProviderIcon :icon="p.icon" :seed="p.id" :name="p.displayName" :text="p.displayName.slice(0, 2).toUpperCase()" />
               <div class="pc-title">
                 <div class="pc-name">{{ p.displayName }}</div>
                 <div class="pc-account">{{ p.account.userName }}<template v-if="p.account.maskedContact"> · {{ p.account.maskedContact }}</template></div>
               </div>
+              <span
+                class="pc-grip"
+                draggable="true"
+                tabindex="0"
+                role="button"
+                aria-label="调整卡片顺序：可拖动，或聚焦后用上下方向键移动"
+                title="拖动排序 · 聚焦后可用 ↑ ↓ 方向键"
+                @click.prevent
+                @dragstart="startDrag(p.id, $event)"
+                @dragend="endDrag"
+                @keydown.up.prevent="keyMove(p.id, -1, $event)"
+                @keydown.down.prevent="keyMove(p.id, 1, $event)"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.7"/><circle cx="15" cy="6" r="1.7"/><circle cx="9" cy="12" r="1.7"/><circle cx="15" cy="12" r="1.7"/><circle cx="9" cy="18" r="1.7"/><circle cx="15" cy="18" r="1.7"/></svg>
+              </span>
             </div>
 
             <div class="pc-plan">
@@ -350,7 +438,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </NuxtLink>
-        </div>
+        </TransitionGroup>
       </template>
 
       <div v-if="showAddModal" class="modal-overlay" @click.self="showAddModal = false">

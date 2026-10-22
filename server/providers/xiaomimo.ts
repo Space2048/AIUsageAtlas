@@ -43,6 +43,15 @@ import {
  *    否则图表停在几个月前的按量记录、当日用量恒为 0。无消费金额字段（套餐按积分计）。
  * POST 类接口必须带 api-platform_ph 的 query（值在 Cookie 里带引号，取用时要剥掉），
  * 拼装逻辑在 apiInPage / fetchViaPastedCookie 里已统一处理。
+ *
+ * 2026-10-22 根治（预换发）：短效 serviceToken 靠保活页 JS 内存续期，dev server
+ * 重启杀掉保活页后磁盘快照里的它必然过期——而控制台 SPA 一加载过期 token 就 401
+ * 全局登出，且该链路会服务端吊销长效 passToken（SSO 探测 code 70016 实测），整条
+ * 会话链报废只能人工重登。自救窗口只在「页面加载之前」：ensureLivePage 新建会话时
+ * 先调插件 preNavigate（renewViaSso，纯 HTTP 用 passToken 走 passport serviceLogin
+ * 换新 serviceToken 并落盘快照），再 goto 控制台。换发被拒时抛错阻断加载，绝不给
+ * SPA 401 的机会。已停在 passport / 采集途中 401 的场景由 silentPassportRelogin
+ * 先换发再重载兜底。passToken 确已吊销时如实报 auth_expired 引导人工重登一次。
  */
 
 const API_BASE = 'https://api.xiaomimimo.com'
@@ -603,26 +612,195 @@ async function collectFromConsole(
 
 const LOGIN_URL = /(passport|account\.xiaomi\.com|\/login|\/signin)/i
 
-async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
-  const fresh = !isPageAlive(ctx.providerId)
-  let page = await ensureLivePage(ctx.providerId, ctx.dataDir, CONSOLE_PAGE)
-  if (fresh) await page.waitForTimeout(2000)
+const PASSPORT_SSO = 'https://account.xiaomi.com/pass/serviceLogin?sid=api-platform&_json=true'
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
-  // 保活页面可能在会话尚未就绪时被弹到 passport 并停在那里；
-  // 关掉重建一次（重建会注入 storage-state 快照）再判定，避免把可恢复的会话判成掉登录
-  if (LOGIN_URL.test(page.url())) {
-    await closeSession(ctx.providerId).catch(() => {})
-    page = await ensureLivePage(ctx.providerId, ctx.dataDir, CONSOLE_PAGE)
-    if (LOGIN_URL.test(page.url())) {
-      throw new PluginError('auth_expired', '浏览器会话已过期，请重新登录（详情页 → 更新凭证 → 浏览器登录）')
+interface SsoResp {
+  code?: number
+  location?: string
+  description?: string
+}
+
+// passport 回包是 &&&START&&& 前缀的 JSON（2026-10-22 实测；前缀 11 字符，勿手数）
+function parseSso(text: string): SsoResp | null {
+  const prefix = '&&&START&&&'
+  const body = text.startsWith(prefix) ? text.slice(prefix.length) : text
+  try {
+    const v = JSON.parse(body) as unknown
+    return v && typeof v === 'object' ? (v as SsoResp) : null
+  } catch {
+    return null
+  }
+}
+
+async function consoleUrlWithPh(context: import('playwright').BrowserContext, path: string): Promise<string> {
+  const cks = await context.cookies(CONSOLE_BASE).catch(() => [])
+  const ph = cks.find((c) => c.name === 'api-platform_ph')?.value.replace(/^"|"$/g, '') ?? ''
+  return CONSOLE_BASE + path + (ph ? `${path.includes('?') ? '&' : '?'}api-platform_ph=${encodeURIComponent(ph)}` : '')
+}
+
+/**
+ * 纯 HTTP 会话换发（2026-10-22 根治方案）：
+ *
+ * 故障链实测——快照里的短效 serviceToken 过期后，保活页/重建页一加载控制台 SPA，
+ * SPA 首轮请求 401 → 全局登出，且 passport 随之吊销长效 passToken（SSO 探测
+ * code 70016），此后整条会话链报废、只能人工重登。自救窗口在「页面加载之前」。
+ *
+ * 所以换发必须纯 HTTP、先于 goto：
+ *   1. 探活现有 serviceToken（页面不在场，401 只是普通响应，不会触发任何登出）；
+ *   2. 失效则拿 passToken 走 passport 原生 serviceLogin?_json=true 换 ticket 回跳；
+ *   3. 回跳落新 serviceToken 后再探活确认。
+ * 语义约定：瞬时/网络错误抛 PluginError('network')——调用方【不要】继续加载页面
+ * （宁可本次同步失败，也不能让 SPA 拿着过期 token 去 401）；passToken 已死则正常
+ * 返回 ok:false，让既有判死路径给出 auth_expired。
+ */
+async function renewViaSso(
+  context: import('playwright').BrowserContext,
+  log?: (m: string) => void
+): Promise<{ ok: boolean; renewed: boolean; reason: string }> {
+  const get = async (url: string, headers: Record<string, string>, timeout: number): Promise<string> => {
+    try {
+      const r = await context.request.get(url, { timeout, headers })
+      const t = await r.text().catch(() => '')
+      return t
+    } catch (e) {
+      throw new PluginError('network', `请求失败：${(e as Error).message.slice(0, 160)}`)
     }
   }
 
-  const { result, authFailed } = await collectFromConsole(<T>(req: PageRequest) =>
-    apiInPage<T>(page, req)
+  const doProbe = async (): Promise<number> => {
+    try {
+      const r = await context.request.get(await consoleUrlWithPh(context, EP.userProfile), {
+        timeout: 15_000,
+        headers: { Accept: 'application/json' },
+      })
+      const status = r.status()
+      await r.text().catch(() => {})
+      return status
+    } catch (e) {
+      throw new PluginError('network', `会话探活请求失败：${(e as Error).message.slice(0, 160)}`)
+    }
+  }
+
+  const p0 = await doProbe()
+  if (p0 === 200) return { ok: true, renewed: false, reason: '现有 serviceToken 仍有效' }
+
+  const cks = await context.cookies('https://account.xiaomi.com').catch(() => [])
+  const pass = cks.find((c) => c.name === 'passToken')
+  if (!pass?.value) return { ok: false, renewed: false, reason: '上下文无 passToken，无法换发' }
+  if (pass.expires > 0 && pass.expires * 1000 < Date.now()) {
+    return { ok: false, renewed: false, reason: 'passToken 本地已过期' }
+  }
+
+  log?.(`会话探活 HTTP ${p0}，走 passToken SSO 换发…`)
+  const ssoText = await get(
+    PASSPORT_SSO,
+    { Accept: 'application/json, text/plain, */*', 'User-Agent': UA },
+    15_000
   )
+  const sso = parseSso(ssoText)
+  if (!sso) return { ok: false, renewed: false, reason: `SSO 回包不可解析：${ssoText.slice(0, 120)}` }
+  if (sso.code !== 0) {
+    return {
+      ok: false,
+      renewed: false,
+      reason: `SSO 拒绝换发 code ${sso.code}${sso.description ? ` ${sso.description}` : ''}（passToken 已失效）`,
+    }
+  }
+  if (!sso.location) return { ok: false, renewed: false, reason: 'SSO 返回 code 0 但无 location' }
+
+  // 回跳 ticket：passport → platform /sts → Set-Cookie 新 serviceToken（request 与
+  // 浏览器上下文共享 Cookie jar，新 token 直接落进会话）
+  const loc = /^https?:/.test(sso.location) ? sso.location : `https://account.xiaomi.com${sso.location}`
+  await get(loc, { 'User-Agent': UA }, 20_000)
+
+  const p1 = await doProbe()
+  if (p1 === 200) {
+    log?.('passToken SSO 换发成功，serviceToken 已续期')
+    return { ok: true, renewed: true, reason: 'passToken SSO 换发成功' }
+  }
+  if (p1 === 401 || p1 === 403) {
+    // 换发成功却仍 401：此时加载页面必然触发 401→全局登出（可能连带吊销 passToken），
+    // 必须挡住 goto，让本次同步先失败，下次重试
+    throw new PluginError('network', `SSO 换发后探活仍 HTTP ${p1}，暂缓加载控制台页面以免触发全局登出`)
+  }
+  log?.(`SSO 换发完成但探活 HTTP ${p1}（非鉴权类状态），按成功继续`)
+  return { ok: true, renewed: true, reason: `换发完成（探活 ${p1}）` }
+}
+
+// ensureLivePage 的 preNavigate 钩子：页面加载前把过期 serviceToken 换新，
+// 换发成功立刻落盘快照——dev server 重启后的第一次加载就走这条路
+async function preNavigateMiMo(
+  context: import('playwright').BrowserContext,
+  opts: { dataDir: string; providerId: string; log?: (m: string) => void }
+): Promise<void> {
+  const r = await renewViaSso(context, opts.log)
+  opts.log?.(`预换发：${r.reason}`)
+  if (r.renewed) await persistStorageState(context, opts.dataDir, opts.providerId).catch(() => {})
+}
+
+// 事后自愈：页面已停在 passport 或采集中途 401 时用（换发成功后重新加载控制台）。
+// renewViaSso 抛 network 时向上抛（本次同步失败，保护 passToken 不被 401 登出烧掉）
+async function silentPassportRelogin(
+  page: import('playwright').Page,
+  ctx: PluginContext
+): Promise<{ ok: boolean; reason: string }> {
+  const r = await renewViaSso(page.context(), ctx.log)
+  if (!r.ok) return { ok: false, reason: r.reason }
+
+  ctx.log(`会话已就绪（${r.reason}），重新加载控制台…`)
+  await page.goto(CONSOLE_PAGE, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(2000).catch(() => {})
+    if (LOGIN_URL.test(page.url()) || !page.url().startsWith(CONSOLE_BASE)) continue
+    const probe = await apiInPage<unknown>(page, { path: EP.userProfile, method: 'GET', body: undefined })
+    if (probe.status === 200) {
+      ctx.log('静默恢复成功，会话已生效')
+      return { ok: true, reason: 'ok' }
+    }
+  }
+  return { ok: false, reason: '换发成功但页面仍未回到控制台' }
+}
+
+async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
+  const fresh = !isPageAlive(ctx.providerId)
+  const navOpts = { preNavigate: preNavigateMiMo, log: ctx.log }
+  // 会话页缺失时 ensureLivePage 会先跑 preNavigate 换发再 goto；
+  // 页面已存活则直接复用（内存续期仍在跑，绝不 reload）
+  let page = await ensureLivePage(ctx.providerId, ctx.dataDir, CONSOLE_PAGE, navOpts)
+  if (fresh) await page.waitForTimeout(2000)
+
+  // 页面停在 passport：serviceToken 过期被弹回。先换发再加载；
+  // 换发被拒（passToken 已死）时直接判死——重建注入旧快照只会重演死法
+  if (LOGIN_URL.test(page.url())) {
+    const heal = await silentPassportRelogin(page, ctx)
+    if (!heal.ok) {
+      throw new PluginError(
+        'auth_expired',
+        `浏览器会话已过期且无法静默恢复（${heal.reason}），请重新登录（详情页 → 更新凭证 → 浏览器登录）`
+      )
+    }
+  }
+
+  const collect = () => collectFromConsole(<T>(req: PageRequest) => apiInPage<T>(page, req))
+  let { result, authFailed } = await collect()
   if (authFailed) {
-    throw new PluginError('auth_expired', '控制台接口返回 401/403：SPA 全局登出已清空会话 Cookie，请重新浏览器登录（详情页 → 更新凭证 → 浏览器登录）')
+    // SPA 对 401/403 的反应是全局登出清会话 Cookie。先换发新 serviceToken、
+    // 干净重载页面，再整批重采一次（旧的半套结果直接丢弃）
+    const heal = await silentPassportRelogin(page, ctx)
+    if (heal.ok) {
+      ;({ result, authFailed } = await collect())
+      if (authFailed) {
+        throw new PluginError('auth_expired', '控制台接口 401/403：换发重载后仍鉴权失败，请重新浏览器登录（详情页 → 更新凭证 → 浏览器登录）')
+      }
+    } else {
+      throw new PluginError(
+        'auth_expired',
+        `控制台接口返回 401/403，静默恢复未成功（${heal.reason}），请重新浏览器登录（详情页 → 更新凭证 → 浏览器登录）`
+      )
+    }
   }
   // 页面里的 token 可能已续期，刷新快照让重启后也能恢复
   await snapshotSession(ctx.providerId, ctx.dataDir).catch(() => {})
@@ -679,6 +857,8 @@ export const xiaomimoPlugin: ProviderPlugin = {
   scheduleDefaultSec: 3600,
   homepage: 'https://platform.xiaomimimo.com',
   consoleUrl: CONSOLE_PAGE,
+  // 保活页/重建页 goto 之前由 ensureLivePage 调用：先纯 HTTP 换发 serviceToken
+  preNavigate: preNavigateMiMo,
   cookieGuide: {
     loginUrl: 'https://platform.xiaomimimo.com/',
     steps: [
