@@ -104,7 +104,7 @@ function maxHistory(p: ProviderVM): number {
 }
 
 function authKindLabel(k: string): string {
-  return k === 'apikey' ? 'API Key' : k === 'cookie' ? 'Cookie' : '浏览器登录'
+  return k === 'apikey' ? 'API Key' : k === 'aksk' ? 'AK/SK' : k === 'cookie' ? 'Cookie' : '浏览器登录'
 }
 
 function relTime(iso: string): string {
@@ -125,10 +125,14 @@ const guideSaving = ref(false)
 const guideResult = ref<{ ok: boolean; message: string } | null>(null)
 
 const selectedPluginMeta = computed(() => plugins.value.find((p) => p.id === selectedPlugin.value))
+// 多站点渠道的当前选择（如 Qoder 国内站/全球版）
+const siteId = ref<string>('')
+const selectedSite = computed(() => selectedPluginMeta.value?.sites?.find((s) => s.id === siteId.value))
 
 watch(selectedPlugin, (id) => {
   const meta = plugins.value.find((p) => p.id === id)
   authKind.value = meta?.authKinds[0] ?? 'apikey'
+  siteId.value = meta?.sites?.[0]?.id ?? ''
   guideResult.value = null
 })
 
@@ -143,6 +147,7 @@ async function addProvider() {
         authKind: authKind.value,
         authValue: authValue.value,
         displayName: displayName.value.trim() || undefined,
+        consoleUrl: selectedSite.value?.consoleUrl || undefined,
       },
     })
     // Cookie 模式：立即同步一次，把验证结果反馈给用户
@@ -189,6 +194,7 @@ async function startBrowserLogin() {
         pluginId: selectedPlugin.value,
         authKind: 'browser-login',
         displayName: displayName.value.trim() || undefined,
+        consoleUrl: selectedSite.value?.consoleUrl || undefined,
       },
     })
     const login = await $fetch<{ ok: boolean; message: string }>(`/api/providers/${res.id}/login`, {
@@ -295,7 +301,7 @@ onBeforeUnmount(() => {
               <div class="pc-plan-info">
                 <div class="pc-plan-name">{{ p.plan.name }}</div>
                 <div class="pc-plan-meta">
-                  <span v-if="(p.plan.unknownFields ?? []).includes('price')" class="unknown-val">价格未获取到</span>
+                  <span v-if="(p.plan.unknownFields ?? []).includes('price')" class="unknown-val">—</span>
                   <template v-else-if="p.plan.price > 0">{{ p.plan.currency === 'USD' ? '$' : '¥' }}{{ p.plan.price }}<b>/期</b></template>
                   <template v-else>免费/按量</template>
                   <span v-if="p.plan.autoRenew"> · 自动续费</span>
@@ -376,6 +382,21 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <!-- 多站点渠道（如 Qoder 国内/全球）：按站点建档，会话与货币各归各 -->
+          <div v-if="selectedPluginMeta?.sites?.length" class="field">
+            <label class="field-label">站点</label>
+            <div class="form-row" style="gap:8px;flex-wrap:wrap">
+              <button
+                v-for="s in selectedPluginMeta.sites"
+                :key="s.id"
+                class="filter-chip"
+                :class="{ active: siteId === s.id }"
+                @click="siteId = s.id"
+              >{{ s.label }}</button>
+            </div>
+            <div class="field-hint">两个站点账号体系独立：可分别添加「Qoder 国内」「Qoder 全球」两个供应商，互不干扰。</div>
+          </div>
+
           <div class="field">
             <label class="field-label">显示名称（可选）</label>
             <input v-model="displayName" class="field-input" placeholder="留空使用渠道默认名；多账号可设为「StepFun 个人」「StepFun 公司」" />
@@ -417,15 +438,30 @@ onBeforeUnmount(() => {
             <div class="field-hint">浏览器登录会弹出真实浏览器，登录一次后会话长期复用；Cookie 约一天过期。</div>
           </div>
 
-          <div class="field">
-            <label class="field-label">凭证（API Key / Cookie）</label>
-            <input v-model="authValue" class="field-input" :placeholder="authKind === 'apikey' ? 'sk-...' : '从浏览器开发者工具复制完整 Cookie'" />
+          <!-- 仅浏览器登录的渠道（如 Trae）没有 API/Cookie 数据面：直接给登录按钮，不再显示凭证输入框 -->
+          <div v-if="authKind === 'browser-login'" class="field">
+            <p class="modal-desc">该渠道不提供 API 调用，仅通过浏览器登录采集数据。点击下方按钮打开浏览器完成登录，会话将自动保存并用于后续同步。</p>
+            <div v-if="guideResult" class="result-banner" :class="guideResult.ok ? 'ok' : 'err'">
+              <span class="result-dot" /><span>{{ guideResult.message }}</span>
+            </div>
+            <div class="modal-actions">
+              <button class="btn" @click="showAddModal = false">取消</button>
+              <button class="btn btn-primary" :disabled="guideSaving" @click="startBrowserLogin">
+                {{ guideSaving ? '等待登录完成…' : '打开浏览器登录并添加' }}
+              </button>
+            </div>
           </div>
+          <template v-else>
+            <div class="field">
+              <label class="field-label">{{ authKind === 'aksk' ? '凭证（AccessKeyId|AccessKeySecret）' : authKind === 'apikey' ? '凭证（API Key）' : '凭证（Cookie）' }}</label>
+              <input v-model="authValue" class="field-input" :placeholder="authKind === 'apikey' ? 'sk-...' : authKind === 'aksk' ? 'AccessKeyId|AccessKeySecret' : '从浏览器开发者工具复制完整 Cookie'" />
+            </div>
 
             <div class="modal-actions">
               <button class="btn" @click="showAddModal = false">取消</button>
-              <button class="btn btn-primary" :disabled="!selectedPlugin" @click="addProvider">添加</button>
+              <button class="btn btn-primary" :disabled="!selectedPlugin || !authValue.trim()" @click="addProvider">添加</button>
             </div>
+          </template>
           </template>
         </div>
       </div>

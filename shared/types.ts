@@ -1,6 +1,6 @@
 export type ProviderCategory = 'subscription' | 'api' | 'aggregate'
 export type SyncStatus = 'ok' | 'failed'
-export type AuthKind = 'apikey' | 'cookie' | 'browser-login'
+export type AuthKind = 'apikey' | 'cookie' | 'browser-login' | 'aksk'
 
 export interface QuotaWindow {
   planName: string
@@ -80,6 +80,8 @@ export interface PluginMeta {
   homepage: string
   scheduleDefaultSec: number
   cookieGuide?: CookieGuide
+  // 多站点渠道（如 Qoder 国内/全球）：添加供应商时可选站点，决定登录页与货币默认值
+  sites?: Array<{ id: string; label: string; consoleUrl: string; currency?: string }>
 }
 
 // 计费平面：订阅套餐（Code Plan / Go 等）与按量 API 分开统计与展示

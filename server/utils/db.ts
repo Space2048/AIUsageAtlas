@@ -34,6 +34,11 @@ export function getDb(): DatabaseSync {
   } catch {
     /* 列已存在 */
   }
+  try {
+    db.exec(`ALTER TABLE provider ADD COLUMN console_url TEXT DEFAULT ''`)
+  } catch {
+    /* 列已存在 */
+  }
   return db
 }
 

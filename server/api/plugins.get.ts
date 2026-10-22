@@ -11,5 +11,6 @@ export default defineEventHandler((): PluginMeta[] =>
     homepage: p.homepage ?? '',
     scheduleDefaultSec: p.scheduleDefaultSec,
     cookieGuide: p.cookieGuide,
+    sites: p.sites,
   }))
 )

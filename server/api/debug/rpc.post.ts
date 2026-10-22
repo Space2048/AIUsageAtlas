@@ -33,11 +33,32 @@ export default defineEventHandler(async (event) => {
     await page.goto(body.consoleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
     await page.waitForTimeout(4000)
     const cookies = await page.context().cookies().catch(() => [])
+    // navigate 模式顺带回传页面文本与内链：用于发现登录后控制台的真实路由/菜单
+    const text = await page
+      .evaluate(() => ({
+        text: document.body.innerText.replace(/\s+/g, ' ').slice(0, 600),
+        links: [...new Set(Array.from(document.querySelectorAll('a')).map((a) => a.getAttribute('href') || ''))]
+          .filter((h) => h.startsWith('/') && !h.startsWith('/_'))
+          .slice(0, 50),
+        // Next.js App Router 的服务端数据埋在 flight 载荷里（用量数字可能只在这里）：
+        // 只回传含关键词的片段，避免整包过大
+        flight: (window as unknown as { __next_f?: Array<Array<unknown>> }).__next_f
+          ?.map((x) => String(x?.[1] ?? ''))
+          .filter((t) => /credit|usage|consume|quota|balance|amount/i.test(t))
+          .slice(0, 8)
+          .map((t) => t.slice(0, 1500))
+          .join('\n@@\n'),
+      }))
+      .catch(() => ({ text: '', links: [] as string[], flight: '' }))
+
     return {
       status: 200,
       body: '',
       pageUrl: page.url(),
       cookieNames: cookies.map((c) => `${c.domain}:${c.name}:exp${c.expires}`),
+      text: text.text,
+      links: text.links,
+      flight: text.flight,
     }
   }
 

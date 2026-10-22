@@ -315,22 +315,22 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
             </div>
             <div class="info-row"><span class="k">当前计划</span><span class="v">{{ detail.plan.name }}</span></div>
             <div class="info-row"><span class="k">计划价格</span><span class="v">
-              <span v-if="planUnknown('price')" class="unknown-val">未获取到</span>
+              <span v-if="planUnknown('price')" class="unknown-val">—</span>
               <template v-else>{{ detail.plan.price > 0 ? fmtCost(detail.plan.price, detail.plan.currency) + ' / 期' : '免费/按量' }}</template>
             </span></div>
             <div class="info-row"><span class="k">续费日期</span><span class="v">
-              <span v-if="planUnknown('renewalDate')" class="unknown-val">未获取到</span>
+              <span v-if="planUnknown('renewalDate')" class="unknown-val">—</span>
               <template v-else>
                 {{ detail.plan.renewalDate ?? '—' }}
                 <span v-if="daysToRenewal(detail.plan.renewalDate)" class="renew-tag" :class="{ urgent: daysToRenewal(detail.plan.renewalDate)!.urgent }" style="margin-left:8px">{{ daysToRenewal(detail.plan.renewalDate)!.text }}</span>
               </template>
             </span></div>
             <div class="info-row"><span class="k">自动续费</span><span class="v">
-              <span v-if="planUnknown('autoRenew')" class="unknown-val">未获取到</span>
+              <span v-if="planUnknown('autoRenew')" class="unknown-val">—</span>
               <template v-else>{{ detail.plan.autoRenew ? '已开启' : '未开启' }}</template>
             </span></div>
             <div class="info-row"><span class="k">账户余额</span><span class="v">
-              <span v-if="!detail.balance" class="unknown-val">未获取到</span>
+              <span v-if="!detail.balance" class="unknown-val">—</span>
               <template v-else>{{ fmtCost(detail.balance.amount, detail.balance.currency) }}</template>
             </span></div>
             <div class="info-row"><span class="k">账户地区</span><span class="v">{{ detail.account.region || '—' }}</span></div>
@@ -532,7 +532,7 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
               class="filter-chip"
               :class="{ active: credKind === k }"
               @click="credKind = k"
-            >{{ k === 'apikey' ? 'API Key' : k === 'cookie' ? 'Cookie' : '浏览器登录' }}</button>
+            >{{ k === 'apikey' ? 'API Key' : k === 'aksk' ? 'AK/SK' : k === 'cookie' ? 'Cookie' : '浏览器登录' }}</button>
           </div>
           <div v-if="credKind === 'browser-login'" class="field">
             <p class="modal-desc">点击后打开内置浏览器完成登录，会话将自动保存并用于后续同步。</p>
@@ -541,8 +541,8 @@ useHead({ title: () => (detail.value ? `${detail.value.displayName} — AIUsageA
             </button>
           </div>
           <div v-else class="field">
-            <label class="field-label">{{ credKind === 'apikey' ? 'API Key' : 'Cookie' }}</label>
-            <textarea v-model="credValue" class="guide-textarea" rows="3" :placeholder="credKind === 'apikey' ? 'sk-...' : 'session=xxxx; other=yyyy'" spellcheck="false" />
+            <label class="field-label">{{ credKind === 'apikey' ? 'API Key' : credKind === 'aksk' ? 'AK/SK（KeyId|KeySecret）' : 'Cookie' }}</label>
+            <textarea v-model="credValue" class="guide-textarea" rows="3" :placeholder="credKind === 'apikey' ? 'sk-...' : credKind === 'aksk' ? 'AccessKeyId|AccessKeySecret' : 'session=xxxx; other=yyyy'" spellcheck="false" />
           </div>
           <div v-if="credResult" class="result-banner" :class="credResult.ok ? 'ok' : 'err'">
             <span class="result-dot" /><span>{{ credResult.message }}</span>

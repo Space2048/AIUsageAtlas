@@ -16,10 +16,18 @@ export default defineNuxtConfig({
       meta: [{ name: 'theme-color', content: '#f7f5f0' }],
     },
   },
+  // desktop/ 是 Tauri 客户端，它的 src-tauri/target 构建产物会被 cargo 长期锁住，
+  // Nuxt 监视到 EBUSY 就整站重启，Web dev server 会被反复掀掉 —— 必须排除在监听之外
+  watch: {
+    ignore: ['**/desktop/**'],
+  },
   vite: {
     server: {
       fs: {
         allow: [fileURLToPath(new URL('.', import.meta.url))],
+      },
+      watch: {
+        ignored: ['**/node_modules/**', '**/desktop/**'],
       },
     },
   },

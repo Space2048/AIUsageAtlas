@@ -5,6 +5,11 @@ export interface PluginContext {
   dataDir: string
   log: (msg: string) => void
   /**
+   * 本供应商实例选定的控制台地址（多站点渠道按 provider.console_url 解析，
+   * 未配置时为插件默认值）。保活、登录、采集都应使用它。
+   */
+  consoleUrl?: string
+  /**
    * 读取本渠道已存的其它凭证（如浏览器模式下取 API Key 补需要 Bearer 的接口）。
    * kind 缺省=最近更新的凭证；返回 null 表示该类型未配置。
    */
@@ -15,6 +20,9 @@ export type CredentialPayload =
   | { kind: 'apikey'; apiKey: string }
   | { kind: 'cookie'; cookie: string }
   | { kind: 'browser-login'; storageStatePath?: string }
+  // 火山引擎等需要 Access Key 签名的渠道：cookie 字段复用为 "AccessKeyId|AccessKeySecret"
+  // （credential.post 对非 apikey 统一存 {kind, cookie:value}，无需改动存储层）
+  | { kind: 'aksk'; cookie: string }
 
 export interface PluginAccount {
   userName?: string
@@ -69,8 +77,17 @@ export interface PluginModelUsage {
   thinkingTokens?: number
   requests?: number
   errors?: number
-  // 计费平面标记（平台数据里带的订阅/按量区分），供详情页分组展示
+  // 计费平面标记，供详情页把订阅套餐与 API 按量分开展示
   billing?: 'subscription' | 'payg'
+}
+
+// 插件采集到的官方模型价目（写入 model_price，source='official'，只补缺不覆盖）
+export interface PluginModelPrice {
+  modelId: string
+  currency: string
+  inputPerM: number
+  outputPerM: number
+  cachedReadPerM: number
 }
 
 export interface PluginFetchResult {
@@ -95,6 +112,11 @@ export interface PluginFetchResult {
    * 定义了就整体替换落库的列表，undefined 表示本次没读到、保留旧值。
    */
   availableModels?: string[]
+  /**
+   * 插件采集到的官方模型价目（如百炼 /api/v1/models 的 prices 字段）。
+   * sync-runner 只在 model_price 缺行时插入（source='official'），不会覆盖人工维护价。
+   */
+  modelPrices?: PluginModelPrice[]
   notes?: string[]
 }
 
@@ -130,6 +152,8 @@ export interface ProviderPlugin {
   // 保活页面地址（浏览器登录型渠道用，前端在此页面自动续期 token）
   consoleUrl?: string
   cookieGuide?: CookieGuide
+  // 多站点渠道（如 Qoder 国内站/全球版）：添加供应商时可选，决定登录页与货币默认值
+  sites?: Array<{ id: string; label: string; consoleUrl: string; currency?: string }>
   // 交互式登录（打开真实浏览器让用户登录，持久化会话）
   login?(ctx: PluginContext): Promise<PluginLoginResult>
   fetch(ctx: PluginContext, cred: CredentialPayload): Promise<PluginFetchResult>

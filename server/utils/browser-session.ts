@@ -170,3 +170,150 @@ export async function restoreKeepAlive(
     }
   }
 }
+
+// ---------- 新渠道插件共用的三件套 ----------
+
+/**
+ * 交互式登录通用流程：本机 Chrome 开窗 → 轮询 probe → 成功即持久化+保活。
+ * probe 返回诊断描述（desc），超时会带最近一次 desc，避免"黑盒超时"。
+ */
+export async function runInteractiveLogin(opts: {
+  providerId: string
+  dataDir: string
+  consoleUrl: string
+  log: (m: string) => void
+  probe: (page: Page) => Promise<{ ok: boolean; desc: string }>
+  waitMs?: number
+}): Promise<{ ok: boolean; message: string }> {
+  const pw = await import('playwright')
+  // 先释放可能正被无头保活实例占用的 profile（双实例同开会互冲 Cookie）
+  await closeSession(opts.providerId).catch(() => {})
+  const context = await launchLoginWindow(pw, opts.dataDir, opts.providerId)
+  try {
+    const page = context.pages()[0] ?? (await context.newPage())
+    await page.goto(opts.consoleUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    opts.log('已打开浏览器，等待完成登录…')
+
+    let closed = false
+    context.on('close', () => {
+      closed = true
+    })
+    const deadline = Date.now() + (opts.waitMs ?? 240_000)
+    let last = '尚未探测'
+    while (Date.now() < deadline) {
+      if (closed) return { ok: false, message: '浏览器窗口已关闭，登录已取消' }
+      await page.waitForTimeout(2500).catch(() => {})
+      const r = await opts.probe(page).catch((e) => ({ ok: false, desc: `探测异常：${String(e).slice(0, 80)}` }))
+      last = r.desc
+      if (r.ok) {
+        markLoggedIn(opts.dataDir, opts.providerId)
+        await persistStorageState(context, opts.dataDir, opts.providerId).catch(() => {})
+        await context.close().catch(() => {})
+        await closeSession(opts.providerId).catch(() => {})
+        await startKeepAlive(opts.providerId, opts.dataDir, opts.consoleUrl)
+        return { ok: true, message: '登录成功，会话已保存并启动保活' }
+      }
+    }
+    return { ok: false, message: `登录超时（4 分钟未检测到会话生效；最近探测：${last}），请重试` }
+  } finally {
+    await context.close().catch(() => {})
+  }
+}
+
+/**
+ * 页内同源 fetch（带会话 Cookie）。非抛错式：返回 status+data+text，
+ * 由插件按平台语义解读（有些平台业务错误也回 HTTP 200）。
+ */
+export async function fetchInPageJson(
+  page: Page,
+  url: string,
+  opts: { method?: 'GET' | 'POST'; body?: unknown; headers?: Record<string, string> } = {}
+): Promise<{ status: number; data: unknown; text: string }> {
+  const result = page.evaluate(
+    async ([u, initStr]) => {
+      const init = JSON.parse(initStr as string) as { method?: string; body?: unknown; headers?: Record<string, string> }
+      const headers: Record<string, string> = { Accept: 'application/json', ...(init.headers ?? {}) }
+      if (init.body !== undefined) headers['Content-Type'] = 'application/json'
+      const res = await fetch(u as string, {
+        method: init.method ?? 'GET',
+        headers,
+        body: init.body === undefined ? undefined : JSON.stringify(init.body),
+        credentials: 'include',
+      })
+      const text = await res.text()
+      let data: unknown = null
+      try {
+        data = text ? JSON.parse(text) : null
+      } catch {
+        /* 非 JSON（网关 HTML 等） */
+      }
+      return { status: res.status, data, text: text.slice(0, 2000) }
+    },
+    [url, JSON.stringify(opts)] as [string, string]
+  ) as Promise<{ status: number; data: unknown; text: string }>
+  return Promise.race([
+    result,
+    new Promise<{ status: number; data: unknown; text: string }>((resolve) =>
+      setTimeout(() => resolve({ status: 0, data: null, text: `请求超时（${url}）` }), 30_000)
+    ),
+  ])
+}
+
+/**
+ * 控制台 API 流量采集：记录页面发出的 api 类请求（方法+路径）。
+ * 新渠道首登后用它把未知接口"钓"出来写进同步日志，据此再精调采集。
+ */
+export function captureApiTraffic(page: Page): { list: () => string[]; stop: () => void } {
+  const seen = new Set<string>()
+  const onReq = (r: import('playwright').Request) => {
+    const u = r.url()
+    if (!/^https?:/.test(u)) return
+    if (/\.(js|css|png|jpe?g|svg|woff2?|ico|map|gif|webp)(\?|$)/.test(u)) return
+    if (!/\/(api|cloudide|bff|gw|jsonrpc|trae\/api)[a-zA-Z0-9/_.:-]/i.test(u)) return
+    // 前端配置类噪音（横幅/错误文案/版本号等）不进样本，给业务 API 让位
+    if (/\/api\/tcc\/|\/icube\/|operation-slots|\/imgextra\//.test(u)) return
+    // 路径 + 请求体都要留全（RPC 型 POST 的 body 常含 Action/参数线索）
+    const body = r.postData()
+    seen.add(`${r.method()} ${u.replace(/^https?:\/\/[^/]+/, '').slice(0, 300)}${body ? ` body=${body.slice(0, 240)}` : ''}`)
+  }
+  page.on('request', onReq)
+  return { list: () => [...seen], stop: () => page.off('request', onReq) }
+}
+
+/**
+ * 响应采集型取数：有些平台（如 Trae）的 WAF 只放行页面自身发出的请求，
+ * evaluate 直调会拿到挑战页 HTML —— 改为由 trigger() 触发页面真实加载，
+ * 收集目标接口的 JSON 响应体（keys 为 URL 匹配子串，先到先得）。
+ */
+export async function captureJsonResponses(
+  page: Page,
+  keys: string[],
+  trigger: () => Promise<void>
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {}
+  const onResp = (r: import('playwright').Response) => {
+    const u = r.url()
+    const key = keys.find((k) => u.includes(k))
+    if (!key || key in out) return
+    r.text()
+      .then((t) => {
+        if (t && t.startsWith('{')) {
+          try {
+            out[key] = JSON.parse(t)
+          } catch {
+            /* 非 JSON */
+          }
+        }
+      })
+      .catch(() => {})
+  }
+  page.on('response', onResp)
+  try {
+    await trigger()
+    // 给在途响应的 body 读取留出落地时间
+    await new Promise((resolve) => setTimeout(resolve, 2500))
+  } finally {
+    page.off('response', onResp)
+  }
+  return out
+}
