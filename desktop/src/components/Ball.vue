@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // 悬浮球：主数字 = 今日费用（折算 CNY），副字 = 今日 Token。
 // 点击展开面板；双击打开 Web 仪表盘；拖拽用 data-tauri-drag-region + 位移守卫。
-import { computed } from 'vue'
+import { computed, onMounted, onBeforeUnmount } from 'vue'
 import type { DashboardData } from '../../../shared/types'
-import { beginPointer, endPointer } from '../tauri'
+import { beginPointer, endPointer, beginDrag, moveDrag, endDrag, onBallEnter, onBallLeave } from '../tauri'
 import { fmtTokens, relTime } from '../utils'
 
 const props = defineProps<{
@@ -49,15 +49,35 @@ function onDbl() {
   emit('forceClose')
   emit('openDashboard')
 }
+
+function onDown() {
+  beginPointer()
+  beginDrag()
+}
+
+onMounted(() => {
+  window.addEventListener('mousemove', moveDrag)
+  window.addEventListener('mouseup', endDrag)
+  window.addEventListener('blur', endDrag)
+  // 边缘收纳：进入=滑出（若已收起），离开=延时滑回（若停靠在边上）
+  document.addEventListener('mouseenter', onBallEnter)
+  document.addEventListener('mouseleave', onBallLeave)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('mousemove', moveDrag)
+  window.removeEventListener('mouseup', endDrag)
+  window.removeEventListener('blur', endDrag)
+  document.removeEventListener('mouseenter', onBallEnter)
+  document.removeEventListener('mouseleave', onBallLeave)
+})
 </script>
 
 <template>
   <div
     class="ball"
     :class="{ native, err: !!error, nodata: !data }"
-    data-tauri-drag-region="true"
     :title="tip"
-    @mousedown="beginPointer"
+    @mousedown="onDown"
     @click="onClick"
     @dblclick="onDbl"
   >
@@ -85,8 +105,8 @@ function onDbl() {
   position: fixed;
   top: 24px;
   left: 24px;
-  width: 76px;
-  height: 76px;
+  width: 104px;
+  height: 104px;
 }
 
 .core {
@@ -95,9 +115,11 @@ function onDbl() {
   height: 72px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--coral-light), var(--coral));
+  /* 光晕总伸展（圆半径 + 偏移 + 模糊）必须 ≤ 窗口半宽（104→52，含 hover 放大），
+     否则会被方形窗口边界裁出可见的方框边缘 */
   box-shadow:
-    0 3px 10px rgba(244, 100, 60, 0.4),
-    0 14px 34px rgba(244, 100, 60, 0.22);
+    0 2px 6px rgba(244, 100, 60, 0.45),
+    0 4px 10px rgba(244, 100, 60, 0.15);
   display: flex;
   flex-direction: column;
   align-items: center;

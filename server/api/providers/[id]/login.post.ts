@@ -12,8 +12,8 @@ export default defineEventHandler(async (event) => {
   const db = getDb()
 
   const provider = db
-    .prepare(`SELECT id, plugin_id, display_name FROM provider WHERE id = ?`)
-    .get(id) as { id: string; plugin_id: string; display_name: string } | undefined
+    .prepare(`SELECT id, plugin_id, display_name, console_url FROM provider WHERE id = ?`)
+    .get(id) as { id: string; plugin_id: string; display_name: string; console_url: string | null } | undefined
   if (!provider) throw createError({ statusCode: 404, statusMessage: '供应商不存在' })
 
   const plugin = getPlugin(provider.plugin_id)
@@ -33,6 +33,8 @@ export default defineEventHandler(async (event) => {
         providerId: id,
         dataDir: process.env.DATA_DIR || '.data',
         log: (m) => logs.push(m),
+        // 多站点渠道用本实例选定的控制台地址（否则回退插件默认）
+        consoleUrl: provider.console_url || plugin.consoleUrl,
       })
     } catch (e) {
       // 启动阶段异常（如 Chromium 撞 profile 锁）此前是未处理 500，UI 只能看到笼统错误：

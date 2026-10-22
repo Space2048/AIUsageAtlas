@@ -3,7 +3,6 @@ name = "aiusageatlas-desktop"
 version = "0.1.0"
 description = "AIUsageAtlas — AI 用量悬浮球桌面客户端"
 edition = "2021"
-private = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -13,12 +12,17 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# 关 DWM 方形阴影用（Win11 对无边框窗口的合成阴影，shadow:false 压不住）
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+raw-window-handle = "0.6"
 
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
-windows-subsystem = "windows"

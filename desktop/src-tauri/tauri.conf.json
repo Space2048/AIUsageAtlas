@@ -13,8 +13,9 @@
     "windows": [
       {
         "label": "ball",
-        "width": 76,
-        "height": 76,
+        "title": "AIUsageAtlas",
+        "width": 104,
+        "height": 104,
         "x": 1280,
         "y": 96,
         "decorations": false,
@@ -25,12 +26,15 @@
         "resizable": false,
         "fullscreen": false,
         "focus": false,
-        "visible": true
+        "visible": true,
+        "minWidth": 104,
+        "minHeight": 104
       },
       {
         "label": "panel",
-        "width": 360,
-        "height": 480,
+        "title": "AIUsageAtlas",
+        "width": 380,
+        "height": 500,
         "decorations": false,
         "transparent": true,
         "shadow": false,
@@ -39,7 +43,9 @@
         "resizable": false,
         "fullscreen": false,
         "focus": true,
-        "visible": false
+        "visible": false,
+        "minWidth": 380,
+        "minHeight": 500
       }
     ],
     "security": {
@@ -48,7 +54,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -60,7 +69,10 @@
         "type": "downloadBootstrapper"
       },
       "nsis": {
-        "languages": ["SimpChinese", "English"],
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
         "displayLanguageSelector": false
       }
     }

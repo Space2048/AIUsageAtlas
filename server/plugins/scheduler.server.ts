@@ -31,14 +31,15 @@ export default defineNitroPlugin((nitroApp) => {
   const restore = () => {
     const db = getDb()
     const rows = db
-      .prepare(`SELECT p.id, p.plugin_id FROM provider p JOIN credential c ON c.provider_id = p.id AND c.kind = 'browser-login'`)
-      .all() as Array<{ id: string; plugin_id: string }>
+      .prepare(`SELECT p.id, p.plugin_id, p.console_url FROM provider p JOIN credential c ON c.provider_id = p.id AND c.kind = 'browser-login'`)
+      .all() as Array<{ id: string; plugin_id: string; console_url: string | null }>
     const providers = rows
       .map((r) => {
         const plugin = listPlugins().find((p) => p.id === r.plugin_id)
-        return plugin?.consoleUrl ? { id: r.id, consoleUrl: plugin.consoleUrl } : null
+        const url = r.console_url || plugin?.consoleUrl
+        return url ? { id: r.id, consoleUrl: url, preNavigate: plugin?.preNavigate } : null
       })
-      .filter((x): x is { id: string; consoleUrl: string } => !!x)
+      .filter((x): x is NonNullable<typeof x> => !!x)
     if (providers.length) void restoreKeepAlive(dataDir, providers)
   }
 

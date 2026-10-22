@@ -9,6 +9,7 @@ export default defineEventHandler(async (event) => {
     displayName?: string
     authKind?: string
     authValue?: string
+    consoleUrl?: string
   }>(event)
 
   if (!body?.pluginId) {
@@ -18,12 +19,25 @@ export default defineEventHandler(async (event) => {
   const plugin = getPlugin(body.pluginId)
   const db = getDb()
 
+  // 多站点渠道（如 Qoder 国内/全球）：站点必须来自插件声明，防注入
+  let consoleUrl = ''
+  if (body.consoleUrl) {
+    if (!plugin?.sites?.some((s) => s.consoleUrl === body.consoleUrl)) {
+      throw createError({ statusCode: 400, statusMessage: 'consoleUrl 不是该渠道声明的站点' })
+    }
+    consoleUrl = body.consoleUrl
+  }
+
   const id = `${body.pluginId}-${Date.now().toString(36)}`
-  db.prepare(`INSERT INTO provider (id, plugin_id, display_name, category, icon) VALUES (?, ?, ?, 'api', ?)`).run(
+  db.prepare(
+    `INSERT INTO provider (id, plugin_id, display_name, category, icon, console_url, sort_order)
+     VALUES (?, ?, ?, 'api', ?, ?, COALESCE((SELECT MAX(sort_order) FROM provider), 0) + 1)`
+  ).run(
     id,
     body.pluginId,
     body.displayName || plugin?.displayName || body.pluginId,
-    plugin?.icon ?? ''
+    plugin?.icon ?? '',
+    consoleUrl
   )
   db.prepare(`INSERT INTO sync_config (provider_id, interval_sec) VALUES (?, ?)`).run(
     id,

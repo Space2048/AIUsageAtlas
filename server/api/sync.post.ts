@@ -2,7 +2,9 @@ import { getDb } from '~~/server/utils/db'
 import { runProviderSync } from '~~/server/utils/sync-runner'
 
 export default defineEventHandler(async (event) => {
-  const body = await readBody<{ providerId?: string }>(event).catch(() => ({}) as { providerId?: string })
+  // 空 body 时 readBody 解析成 undefined（不是 reject），必须再兜一层，
+  // 否则前端「同步全部」（不带 body 调用）会 500
+  const body = (await readBody<{ providerId?: string }>(event).catch(() => undefined)) ?? {}
   const db = getDb()
   const targets = body.providerId
     ? (db.prepare(`SELECT id FROM provider WHERE id = ?`).all(body.providerId) as Array<{ id: string }>)

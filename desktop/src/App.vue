@@ -8,12 +8,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import Ball from './components/Ball.vue'
 import Panel from './components/Panel.vue'
 import { useDashboard, openDashboard } from './api'
-import { isNative, currentView, restoreBallPos, saveBallPosOnMove, onTrayAction, onBroadcast, broadcast, emitToggle, showPanelNear, type BallRect } from './tauri'
+import { isNative, currentView, restoreBallPos, saveBallPosOnMove, onTrayAction, onBroadcast, broadcast, emitToggle, showPanelNear, diag, type BallRect } from './tauri'
 import { isStale } from './utils'
 
 const native = isNative()
 const view = currentView()
 const overlay = ref(false)
+const panelRef = ref<{ playOpen: () => void; playClose: () => Promise<void> } | null>(null)
 
 // 悬浮球窗口独享一份数据（面板组件自带一份，互不干扰）
 const dash = view === 'ball' ? useDashboard() : null
@@ -38,6 +39,7 @@ function onToggle() {
     overlay.value = !overlay.value
     return
   }
+  diag('ball toggle clicked')
   serialize(async () => emitToggle(await readBallRect()))
 }
 
@@ -46,12 +48,13 @@ function onForceClose() {
     overlay.value = false
     return
   }
+  diag('ball force-close (dblclick)')
   serialize(async () => emitToggle({ ...(await readBallRect()), force: true }))
 }
 
 function closeSelf() {
   if (native && view === 'panel') {
-    getCurrentWindow().hide().catch(() => {})
+    void hidePanelNow()
   } else {
     overlay.value = false
   }
@@ -71,13 +74,28 @@ function onBallFocus() {
 async function onPanelToggleMsg(rect: BallRect) {
   const win = getCurrentWindow()
   const visible = await win.isVisible().catch(() => false)
+  diag(`panel got toggle rect=${JSON.stringify(rect)} visible=${visible}`)
   if (visible) {
     clearTimeout(hideTimer)
-    await win.hide().catch(() => {})
+    await hidePanelNow()
     return
   }
   if (rect.force) return // 强制关闭时若已隐藏，什么都不做
+  panelRef.value?.playOpen() // 重放展开动画（原生面板窗口 DOM 是复用的）
   await showPanelNear(rect)
+}
+
+// 隐藏前先播退场动画，再真正 hide 窗口
+let panelHiding = false
+async function hidePanelNow() {
+  if (panelHiding) return
+  panelHiding = true
+  try {
+    await panelRef.value?.playClose()
+    await getCurrentWindow().hide().catch(() => {})
+  } finally {
+    panelHiding = false
+  }
 }
 
 function onPanelBallActivated() {
@@ -85,21 +103,20 @@ function onPanelBallActivated() {
 }
 
 function onPanelBlur() {
-  // 点面板外部 → 130ms 后隐藏；期间若收到球的激活/切换信号则取消
+  // 点面板外部 → 130ms 后隐藏（含退场动画）；期间若收到球的激活/切换信号则取消
   clearTimeout(hideTimer)
-  hideTimer = setTimeout(() => {
-    getCurrentWindow()
-      .hide()
-      .catch(() => {})
-  }, 130)
+  hideTimer = setTimeout(() => void hidePanelNow(), 130)
 }
 
 onMounted(() => {
   if (native && view === 'ball') {
     window.addEventListener('focus', onBallFocus)
+    window.addEventListener('mousedown', (e) => diag(`mousedown@${e.clientX},${e.clientY}`), true)
+    window.addEventListener('mouseup', (e) => diag(`mouseup@${e.clientX},${e.clientY}`), true)
     restoreBallPos()
     saveBallPosOnMove()
     onTrayAction((action) => {
+      diag(`tray action=${action}`)
       if (action === 'dashboard') openDashboard()
       else if (action === 'refresh') dash?.sync()
       else if (action === 'toggle-panel') onToggle()
@@ -108,6 +125,11 @@ onMounted(() => {
   if (native && view === 'panel') {
     onBroadcast('atlas-toggle', (rect: BallRect) => serialize(() => onPanelToggleMsg(rect)))
     onBroadcast('atlas-ball-activated', onPanelBallActivated)
+    // 面板开着时拖动悬浮球 → 立即收起面板
+    onBroadcast('atlas-ball-dragging', () => {
+      clearTimeout(hideTimer)
+      void hidePanelNow()
+    })
     window.addEventListener('blur', onPanelBlur)
   }
 })
@@ -121,7 +143,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="view === 'panel'">
-    <Panel :overlay="!native" @close="closeSelf" />
+    <Panel ref="panelRef" :overlay="!native" @close="closeSelf" />
   </div>
   <div v-else class="stage">
     <Ball

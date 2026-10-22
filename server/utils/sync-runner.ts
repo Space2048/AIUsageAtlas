@@ -242,6 +242,15 @@ function applyResult(providerId: string, result: PluginFetchResult) {
     )
   }
 
+  // 插件采集的官方价目：缺行才插（source=official），不覆盖人工维护价与既有生效版本
+  for (const p of result.modelPrices ?? []) {
+    db.prepare(
+      `INSERT INTO model_price (provider_id, model_id, source, currency, input_per_m, output_per_m, cached_read_per_m, cached_write_per_m, context_window)
+       SELECT ?, ?, 'official', ?, ?, ?, ?, 0, 0
+       WHERE NOT EXISTS (SELECT 1 FROM model_price WHERE provider_id = ? AND model_id = ? AND source = 'official')`
+    ).run(providerId, p.modelId, p.currency, p.inputPerM, p.outputPerM, p.cachedReadPerM, providerId, p.modelId)
+  }
+
   for (const m of result.modelUsage ?? []) {
     db.prepare(
       `INSERT OR REPLACE INTO usage_model_daily (provider_id, date, model_id, input_tokens, output_tokens, cached_tokens, thinking_tokens, requests, errors, billing)
@@ -273,8 +282,8 @@ export async function runProviderSync(providerId: string): Promise<SyncOutcome> 
   const started = Date.now()
 
   const provider = db
-    .prepare(`SELECT id, plugin_id, display_name FROM provider WHERE id = ?`)
-    .get(providerId) as { id: string; plugin_id: string; display_name: string } | undefined
+    .prepare(`SELECT id, plugin_id, display_name, console_url FROM provider WHERE id = ?`)
+    .get(providerId) as { id: string; plugin_id: string; display_name: string; console_url: string | null } | undefined
   if (!provider) {
     return { providerId, ok: false, mode: 'unconfigured', error: '供应商不存在' }
   }
@@ -296,6 +305,8 @@ export async function runProviderSync(providerId: string): Promise<SyncOutcome> 
         providerId,
         dataDir: process.env.DATA_DIR || '.data',
         log: (m) => logs.push(m),
+        // 多站点渠道按供应商实例解析（provider.console_url，缺省用插件默认站点）
+        consoleUrl: provider.console_url || plugin.consoleUrl,
         loadCredential: (kind?: string) => loadCredential(providerId, kind),
       },
       cred
