@@ -14,9 +14,10 @@ import {
 /**
  * 智谱 BigModel 插件
  *
- * 2026-10-21 核对：控制台同源的 /api/monitor/*、/api/biz/*、/api/finance/* 对
- * Bearer API Key 直接放行（匿名请求 code:1001），浏览器会话 Cookie 是等价的第二传输层，
- * 因此抽取 JsonGet 传输层，Key 模式与浏览器登录模式共用全部采集逻辑：
+ * 2026-10-22 核对：控制台同源的 /api/monitor/*、/api/biz/*、/api/finance/* **不认会话 Cookie**，
+ * 只认 Authorization（匿名/仅 Cookie 均回 HTTP 200 + code:1001）。登录后的 token 写在
+ * .bigmodel.cn 的 bigmodel_token_* Cookie 里且 JS 可读，浏览器模式据此自拼 Bearer，
+ * 与 Key 模式共用全部采集逻辑（Key 模式为用户 API Key，浏览器模式为登录 token）：
  * · GET /api/monitor/usage/model-usage?startTime=&endTime=   —— 按模型用量时序，7 天分片
  *    （30 天+ code:500），小时槽聚合到日；只有 token、无消费金额
  * · GET /api/monitor/credit-usage/usage-detail?…             —— Code Plan 积分平面（优先）：
@@ -61,6 +62,15 @@ interface Envelope<T> {
   code?: number
   msg?: string
   data?: T
+}
+
+// /biz/customer/getCustomerInfo 的 data（浏览器登录态下的账户身份）
+interface CustomerInfo {
+  customerName?: string
+  nickName?: string
+  phoneNumber?: string
+  email?: string | null
+  userType?: string
 }
 
 // 传输层：Key 模式 = fetchJson + Bearer；浏览器模式 = 页内 fetch + 会话 Cookie
@@ -589,9 +599,27 @@ async function fetchViaApiKey(ctx: PluginContext, apiKey: string): Promise<Plugi
 
 // ---------- 浏览器登录模式：同源 Cookie 作为第二传输层 ----------
 
-async function fetchInPage<T>(page: import('playwright').Page, url: string): Promise<T> {
-  const call = page.evaluate(async (u) => {
-    const res = await fetch(u as string, { credentials: 'include', headers: { Accept: 'application/json' } })
+// 控制台 /api/* 只认 Authorization，会话 Cookie 本身不带身份（2026-10-22 实测：
+// 仅带 Cookie 时 code:1001「Header中未收到Authorization参数」）。SPA 的做法是读
+// document.cookie 里的 bigmodel_token_* 再拼 Bearer，浏览器模式照抄这一步。
+async function readSessionToken(page: import('playwright').Page): Promise<string | null> {
+  return page
+    .evaluate(() => {
+      const hit = document.cookie
+        .split(';')
+        .map((c) => c.trim())
+        .find((c) => /^bigmodel_token/i.test(c))
+      return hit ? hit.slice(hit.indexOf('=') + 1) : null
+    })
+    .catch(() => null)
+}
+
+async function fetchInPage<T>(page: import('playwright').Page, url: string, token?: string): Promise<T> {
+  const call = page.evaluate(async ([u, auth]) => {
+    const res = await fetch(u as string, {
+      credentials: 'include',
+      headers: { Accept: 'application/json', ...(auth ? { Authorization: `Bearer ${auth}` } : {}) },
+    })
     const text = await res.text()
     let data: unknown = null
     try {
@@ -605,7 +633,7 @@ async function fetchInPage<T>(page: import('playwright').Page, url: string): Pro
       throw e
     }
     return data
-  }, url) as Promise<T>
+  }, [url, token] as [string, string | undefined]) as Promise<T>
   return Promise.race([call, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`请求超时（${url}）`)), 30_000))])
 }
 
@@ -622,14 +650,26 @@ async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
     }
   }
 
-  const get: JsonGet = <T,>(url: string): Promise<T> => fetchInPage<T>(page, url)
+  const token = await readSessionToken(page)
+  if (!token) {
+    throw new PluginError('auth_expired', 'profile 里没有 bigmodel_token_* Cookie，会话已失效，请重新浏览器登录')
+  }
 
-  // 会话有效性 + 计费平面预判（订阅能读=会话可用；顺带拿 sub 避免二次请求）
+  const get: JsonGet = <T,>(url: string): Promise<T> => fetchInPage<T>(page, url, token)
+
+  // 会话有效性 + 身份 + 计费平面预判（订阅能读=会话可用；顺带拿 sub 避免二次请求）
   let sub: Awaited<ReturnType<typeof fetchSubscription>>
+  let customer: CustomerInfo | null = null
   try {
-    await get(`${API}/biz/customer/getCustomerInfo`)
+    const who = await get<Envelope<CustomerInfo>>(`${API}/biz/customer/getCustomerInfo`)
+    // 匿名请求也是 HTTP 200，只有 code:1001 说明 token 没换成身份
+    if (who?.code === 1001) {
+      throw new PluginError('auth_expired', '控制台会话已失效（业务码 1001：请求未带上登录身份），请重新浏览器登录')
+    }
+    customer = who?.code === 200 ? (who.data ?? null) : null
     sub = await fetchSubscription(get)
   } catch (e) {
+    if (e instanceof PluginError) throw e
     const s = (e as { status?: number }).status
     if (s === 401 || s === 403) {
       throw new PluginError('auth_expired', `控制台会话已失效（HTTP ${s}），请重新浏览器登录`)
@@ -640,6 +680,14 @@ async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
   const notes: string[] = []
   const isCoding = !!sub
   const res = await collectAll(get, notes, isCoding, undefined, sub)
+  if (customer) {
+    res.account = {
+      userName: customer.nickName || customer.customerName || '控制台用户',
+      maskedContact: customer.phoneNumber ?? '',
+      region: 'CN',
+    }
+    notes.push(`账户身份：${res.account.userName}${customer.userType ? `（${customer.userType}）` : ''}（getCustomerInfo）`)
+  }
   notes.push('浏览器会话采集：模型列表与基座探测需 Bearer，沿用 API Key 模式的结果（availableModels 不刷新）')
   ctx.log(`浏览器会话有效${sub ? `，订阅 ${sub.name}` : '（未读到订阅）'}`)
 
@@ -685,11 +733,19 @@ export const bigmodelPlugin: ProviderPlugin = {
         const ok = await page
           .evaluate(async () => {
             try {
+              // 登录后 token 落在 .bigmodel.cn 的 bigmodel_token_*（JS 可读），
+              // 但 /api/* 只认 Authorization，光带 Cookie 仍是 code:1001，必须自己拼 Bearer
+              const hit = document.cookie
+                .split(';')
+                .map((c) => c.trim())
+                .find((c) => /^bigmodel_token/i.test(c))
+              if (!hit) return false
               const r = await fetch('https://open.bigmodel.cn/api/biz/customer/getCustomerInfo', {
                 credentials: 'include',
-                headers: { Accept: 'application/json' },
+                headers: { Accept: 'application/json', Authorization: `Bearer ${hit.slice(hit.indexOf('=') + 1)}` },
               })
-              return r.status === 200
+              const j = (await r.json()) as { code?: number } | null
+              return j?.code === 200
             } catch {
               return false
             }

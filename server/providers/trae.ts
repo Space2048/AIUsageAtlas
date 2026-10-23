@@ -70,6 +70,35 @@ function maskContact(s: string): string {
   return s.replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2')
 }
 
+/**
+ * trae.cn / trae.com.cn 按出口 IP 做区域限制：非中国大陆返回 HTTP 403 +
+ * 「抱歉，您当前区域不支持访问」，且 Content-Type 是 application/octet-stream、
+ * 无 Content-Disposition —— Chrome 会把这跳导航当成文件下载，Playwright 侧表现为
+ * `page.goto: Download is starting`，登录窗口连页面都打不开。
+ * 裸请求也可能被 WAF 拒，所以只在命中该文案时判定，其它情况交给真实浏览器流程。
+ */
+async function checkGeoBlocked() {
+  try {
+    const res = await fetch(CONSOLE_PAGE, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+      signal: AbortSignal.timeout(15_000),
+    })
+    const text = await res.text().catch(() => '')
+    if (/区域不支持访问/.test(text)) {
+      throw new PluginError(
+        'network',
+        'trae.cn 按出口 IP 做了区域限制（当前网络不在中国大陆，官网返回「抱歉，您当前区域不支持访问」，浏览器会把它当成下载，登录窗口打不开）。请在大陆网络、或代理出口在大陆的环境下重试浏览器登录'
+      )
+    }
+  } catch (e) {
+    if (e instanceof PluginError) throw e
+  }
+}
+
 async function ensureSession(ctx: PluginContext): Promise<import('playwright').Page> {
   const fresh = !isPageAlive(ctx.providerId)
   let page = await ensureLivePage(ctx.providerId, ctx.dataDir, CONSOLE_PAGE)
@@ -85,6 +114,7 @@ async function ensureSession(ctx: PluginContext): Promise<import('playwright').P
 }
 
 async function fetchViaBrowser(ctx: PluginContext): Promise<PluginFetchResult> {
+  await checkGeoBlocked()
   const page = await ensureSession(ctx)
   const notes: string[] = []
   const res: PluginFetchResult = { notes }
@@ -181,6 +211,7 @@ export const traePlugin: ProviderPlugin = {
   consoleUrl: CONSOLE_PAGE,
 
   async login(ctx: PluginContext) {
+    await checkGeoBlocked()
     return runInteractiveLogin({
       providerId: ctx.providerId,
       dataDir: ctx.dataDir,
