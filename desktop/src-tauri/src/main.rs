@@ -81,10 +81,11 @@ fn main() {
             let menu = Menu::with_items(app, &[&dashboard, &refresh, &quit])?;
 
             TrayIconBuilder::with_id("main-tray")
+                // 托盘图标编译期直接嵌 icons/32x32.png：default_window_icon/PE 资源链路
+                // 曾出现「磁盘图标已更新但托盘仍是旧图」的缓存漂移，include_bytes 自证自洽
                 .icon(
-                    app.default_window_icon()
-                        .expect("缺少应用图标：请先运行 `npx tauri icon` 生成 icons/")
-                        .clone(),
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                        .expect("tray icon png"),
                 )
                 .tooltip("AIUsageAtlas")
                 .menu(&menu)
