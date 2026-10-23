@@ -14,7 +14,7 @@ export const PANEL_W = 380 // 与 tauri.conf.json 的 panel 窗口一致（卡�
 export const PANEL_H = 500
 export const BALL_W = 104 // 与 tauri.conf.json 的 ball 窗口一致（含光晕余量）
 export const BALL_H = 104
-const SNAP_EDGE = 28 // 距显示器边缘多少像素内触发磁吸
+const SNAP_EDGE = 12 // 距显示器边缘多少像素内触发磁吸（贴得够近才判定）
 const SNAP_INSET = 0 // 吸附后与边缘的距离（0 = 完全贴边）
 const PANEL_EDGE = 8 // 面板贴屏幕边时留的边距
 
@@ -319,27 +319,33 @@ export function emitToggle(rect: BallRect) {
 }
 
 // 面板窗口内：根据球的位置决定自己出现在哪（球下方优先，越界翻到上方并夹回屏内）
+// 纯计算版：供 showPanelNear 与「动画锚点方向」共用同一套定位，避免两处公式漂移。
+export async function computePanelPos(rect: BallRect): Promise<{ x: number; y: number }> {
+  // 面板此刻可能还隐藏着，按球的中心点找所在显示器（隐藏窗口的 currentMonitor 可能为 null）
+  let mon: Monitor | null = null
+  try {
+    mon = await monitorFromPoint(Math.round(rect.x + rect.w / 2), Math.round(rect.y + rect.h / 2))
+  } catch {
+    /* 老版本没有 monitorFromPoint 时退化为不夹边 */
+  }
+  let x = Math.round(rect.x + rect.w / 2 - PANEL_W / 2)
+  let y = Math.round(rect.y + rect.h + 10)
+  if (mon) {
+    const maxX = mon.position.x + mon.size.width - PANEL_W - PANEL_EDGE
+    const minX = mon.position.x + PANEL_EDGE
+    x = Math.min(Math.max(x, minX), Math.max(minX, maxX))
+    const below = mon.position.y + mon.size.height - PANEL_H - PANEL_EDGE
+    if (y > below) y = Math.round(rect.y - PANEL_H - 10) // 下方放不下 → 球上方
+    y = Math.min(Math.max(y, mon.position.y + PANEL_EDGE), Math.max(PANEL_EDGE, below))
+  }
+  return { x, y }
+}
+
 export async function showPanelNear(rect: BallRect) {
   const win = getCurrentWindow()
   try {
-    // 面板此刻还隐藏着，按球的中心点找所在显示器（隐藏窗口的 currentMonitor 可能为 null）
-    let mon: Monitor | null = null
-    try {
-      mon = await monitorFromPoint(Math.round(rect.x + rect.w / 2), Math.round(rect.y + rect.h / 2))
-    } catch {
-      /* 老版本没有 monitorFromPoint 时退化为不夹边 */
-    }
-    let x = Math.round(rect.x + rect.w / 2 - PANEL_W / 2)
-    let y = Math.round(rect.y + rect.h + 10)
-    if (mon) {
-      const maxX = mon.position.x + mon.size.width - PANEL_W - PANEL_EDGE
-      const minX = mon.position.x + PANEL_EDGE
-      x = Math.min(Math.max(x, minX), Math.max(minX, maxX))
-      const below = mon.position.y + mon.size.height - PANEL_H - PANEL_EDGE
-      if (y > below) y = Math.round(rect.y - PANEL_H - 10) // 下方放不下 → 球上方
-      y = Math.min(Math.max(y, mon.position.y + PANEL_EDGE), Math.max(PANEL_EDGE, below))
-    }
-    await win.setPosition(new PhysicalPosition(x, y))
+    const pos = await computePanelPos(rect)
+    await win.setPosition(new PhysicalPosition(pos.x, pos.y))
     await win.show()
     await win.setFocus()
   } catch {

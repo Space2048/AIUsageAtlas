@@ -8,13 +8,15 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import Ball from './components/Ball.vue'
 import Panel from './components/Panel.vue'
 import { useDashboard, openDashboard } from './api'
-import { isNative, currentView, restoreBallPos, saveBallPosOnMove, onTrayAction, onBroadcast, broadcast, emitToggle, showPanelNear, diag, type BallRect } from './tauri'
+import { isNative, currentView, restoreBallPos, saveBallPosOnMove, onTrayAction, onBroadcast, broadcast, emitToggle, showPanelNear, computePanelPos, diag, PANEL_W, PANEL_H, type BallRect } from './tauri'
 import { isStale } from './utils'
 
 const native = isNative()
 const view = currentView()
 const overlay = ref(false)
 const panelRef = ref<{ playOpen: () => void; playClose: () => Promise<void> } | null>(null)
+// 弹出动画面板锚点：按「球在面板的哪个方位」决定 transform-origin 与进入偏移方向
+const panelOrigin = ref({ ox: '50%', oy: '100%', ey: 10 })
 
 // 悬浮球窗口独享一份数据（面板组件自带一份，互不干扰）
 const dash = view === 'ball' ? useDashboard() : null
@@ -81,6 +83,21 @@ async function onPanelToggleMsg(rect: BallRect) {
     return
   }
   if (rect.force) return // 强制关闭时若已隐藏，什么都不做
+  // 锚点朝向球：用与 showPanelNear 同一套定位公式推算面板将出现的位置，再取球相对方位
+  try {
+    const pos = await computePanelPos(rect)
+    const ballCx = rect.x + rect.w / 2
+    const ballCy = rect.y + rect.h / 2
+    const panelCx = pos.x + PANEL_W / 2
+    const panelCy = pos.y + PANEL_H / 2
+    panelOrigin.value = {
+      ox: ballCx < panelCx ? 'left' : 'right',
+      oy: ballCy < panelCy ? 'top' : 'bottom',
+      ey: ballCy < panelCy ? -8 : 8,
+    }
+  } catch {
+    /* 算不出方位就用默认锚点 */
+  }
   panelRef.value?.playOpen() // 重放展开动画（原生面板窗口 DOM 是复用的）
   await showPanelNear(rect)
 }
@@ -143,7 +160,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="view === 'panel'">
-    <Panel ref="panelRef" :overlay="!native" @close="closeSelf" />
+    <Panel ref="panelRef" :overlay="!native" :origin="panelOrigin" @close="closeSelf" />
   </div>
   <div v-else class="stage">
     <Ball

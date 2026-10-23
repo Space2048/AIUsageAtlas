@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 悬浮球：主数字 = 今日费用（折算 CNY），副字 = 今日 Token。
 // 点击展开面板；双击打开 Web 仪表盘；拖拽用 data-tauri-drag-region + 位移守卫。
-import { computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import type { DashboardData } from '../../../shared/types'
 import { beginPointer, endPointer, beginDrag, moveDrag, endDrag, onBallEnter, onBallLeave } from '../tauri'
 import { fmtTokens, relTime } from '../utils'
@@ -19,6 +19,8 @@ const emit = defineEmits<{
   forceClose: []
   openDashboard: []
 }>()
+
+const pop = ref(false)
 
 const cost = computed(() =>
   props.data ? '¥' + props.data.summary.todayCostCny.toFixed(2) : props.loading ? '…' : '—',
@@ -42,6 +44,9 @@ const tip = computed(() => {
 function onClick() {
   if (endPointer()) return // 这一下是拖拽，不当成点击
   emit('toggle')
+  // 点击弹跳反馈（与面板弹出呼应）
+  pop.value = true
+  setTimeout(() => (pop.value = false), 320)
 }
 
 function onDbl() {
@@ -81,7 +86,7 @@ onBeforeUnmount(() => {
     @click="onClick"
     @dblclick="onDbl"
   >
-    <div class="core">
+    <div class="core" :class="{ pop }">
       <div class="cost num">{{ cost }}</div>
       <div class="tok num">{{ tok }}<i>tok</i></div>
       <span v-if="error" class="badge bang" title="服务未连接">!</span>
@@ -114,20 +119,20 @@ onBeforeUnmount(() => {
   width: 72px;
   height: 72px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--coral-light), var(--coral));
-  /* 光晕总伸展（圆半径 + 偏移 + 模糊）必须 ≤ 窗口半宽（104→52，含 hover 放大），
-     否则会被方形窗口边界裁出可见的方框边缘 */
+  /* 白瓷极简：白底细描边 + 中性柔影；阴影总伸展（偏移+模糊）≤ 窗口半宽余量（104→52，含 hover 放大） */
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   box-shadow:
-    0 2px 6px rgba(244, 100, 60, 0.45),
-    0 4px 10px rgba(244, 100, 60, 0.15);
+    0 3px 10px rgba(38, 36, 31, 0.13),
+    0 1px 3px rgba(38, 36, 31, 0.08);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   transition:
     transform 0.16s ease,
-    filter 0.2s ease,
-    opacity 0.2s ease;
+    border-color 0.2s ease,
+    background 0.2s ease;
 }
 .ball:hover .core {
   transform: scale(1.05);
@@ -135,41 +140,51 @@ onBeforeUnmount(() => {
 .ball:active .core {
   transform: scale(0.96);
 }
+.core.pop {
+  animation: ball-pop 320ms cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+@keyframes ball-pop {
+  0% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(0.88);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
 
 .cost {
   font-size: 15.5px;
   font-weight: 780;
   letter-spacing: -0.4px;
-  color: #fff;
+  color: var(--coral);
   line-height: 1.1;
-  text-shadow: 0 1px 2px rgba(120, 40, 15, 0.22);
 }
 .tok {
   margin-top: 2px;
-  font-size: 10px;
-  font-weight: 620;
-  color: rgba(255, 255, 255, 0.88);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text-faint);
   line-height: 1;
 }
 .tok i {
   font-style: normal;
   font-size: 8px;
-  opacity: 0.72;
+  opacity: 0.75;
   margin-left: 1px;
 }
 
 .ball.nodata .cost,
 .ball.nodata .tok {
-  color: rgba(255, 255, 255, 0.78);
+  color: var(--text-faint);
 }
 
+/* 服务未连接：红描边 + 浅红底，数字保持珊瑚 */
 .ball.err .core {
-  filter: saturate(0.45);
-  opacity: 0.72;
-}
-.ball.err:hover .core {
-  filter: saturate(0.6);
-  opacity: 0.9;
+  border-color: var(--red);
+  background: #fdf6f5;
 }
 
 .badge {

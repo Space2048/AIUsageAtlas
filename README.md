@@ -12,6 +12,7 @@
 - **供应商详情**：账户信息、计划与续费、配额窗口、近 30 日用量图、模型用量明细（含价格对照）、同步间隔配置、同步日志、删除
 - **价格表**：模型输入/输出/缓存价格（LiteLLM 口径快照 + 渠道自带价格）
 - **设置**：显示币种与汇率、时区、访问令牌管理、告警规则
+- **桌面悬浮球**（Tauri 2 · Windows）：常驻置顶白瓷球显示今日费用/Token，单击展开分组面板，贴边收纳、开机自启
 - 手动刷新（全局/单渠道），采集按渠道插件化、可配独立间隔
 
 ## 快速开始
@@ -34,16 +35,52 @@ npm run dev        # http://localhost:3000
 
 > 注意：本项目锁定 `nuxt@3.18.1`。3.17.x 在部分环境 dev 模式有 module runner 403 问题，请勿随意升级。
 
+## 桌面悬浮球客户端（Tauri 2 · Windows）
+
+常驻桌面的悬浮球：白瓷球体显示**今日费用 / 今日 Token**，单击展开分组面板，双击打开 Web 仪表盘，
+拖拽贴边自动收纳（悬停边条滑出）。
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/ball.png" width="130" alt="悬浮球"><br><sub>白瓷球 · 四态</sub></td>
+    <td align="center"><img src="docs/screenshots/panel.png" width="250" alt="分组面板"><br><sub>置顶 + 全部渠道</sub></td>
+    <td align="center"><img src="docs/screenshots/settings.png" width="250" alt="设置抽屉"><br><sub>设置抽屉</sub></td>
+  </tr>
+</table>
+
+**能力一览**
+
+- **悬浮球**：白瓷底 + 珊瑚费用数字；服务未连接 = 红描边 `!`，数据过期 = 灰点，贴边收起只留月牙
+- **面板分组**：三格汇总条（费用/Token/数据时间）→「置顶」组（**自选最多 2 个**，第 3 个挤掉最早；展示全部额度窗口 + 余额 + 今日/同步脚注）→「全部渠道」单行（余额 · 最紧张百分比 · 紧凑倒计时 · 图钉，按紧张度降序）
+- **设置抽屉**：服务器地址（输入即生效，带连接自检）、开机自启（写 `HKCU\Run`）、关于
+- **交互**：贴边磁吸（距边缘 12px 内吸附，四边/角落/跨屏）+ 边缘收纳动画（800ms 延迟收回、悬停滑出）；面板弹出按球的方位选锚点回弹，点球球体同步弹跳
+- **数据**：`GET /api/dashboard` 60s 轮询 + `POST /api/sync` 手动同步，与 Web 仪表盘同源同口径
+
+```bash
+cd desktop
+npm install
+scripts\tauri-dev.bat      # 开发（自动加载 VS2019 vcvars，勿用裸 npm run tauri dev）
+scripts\tauri-exe.bat      # 只出 prod exe（tauri build --no-bundle）
+scripts\tauri-build.bat    # 完整打包：NSIS 安装包 + MSI
+```
+
+> 设计细节与 Windows 坑位（SM_CXMINTRACK 钳宽、DWM 方形阴影、裸 cargo 编出 dev 空窗二进制、
+> HTCAPTION 拖拽失效等）见 [desktop/README.md](desktop/README.md)。
+
 ## 目录结构
 
 ```
 ├── pages/               # 页面（仪表盘/详情/价格表/设置）
 ├── components/          # AppHeader 等
+├── desktop/             # Tauri 2 桌面悬浮球（独立子项目，见 desktop/README.md）
+├── docs/                # 架构/数据模型文档 + screenshots（README 配图）
 ├── public/              # 图标：icon.svg（矢量源）/ favicon.ico / apple-touch-icon.png
 ├── scripts/             # 诊断脚本与图标生成（node scripts/generate-icons.mjs）
 ├── server/
 │   ├── api/             # REST 接口
-│   └── utils/           # SQLite 连接、建表、种子数据
+│   ├── middleware/      # CORS 等（桌面客户端跨域依赖）
+│   ├── providers/       # 渠道插件框架 + 各渠道实现
+│   └── utils/           # SQLite 连接、建表、同步器、浏览器会话
 ├── shared/types.ts      # 前后端共享类型
 └── assets/css/main.css  # 消费级明亮风设计系统
 ```
@@ -104,6 +141,7 @@ Cookie 类渠道内置引导流程（[components/CookieGuide.vue](components/Coo
 
 ## 当前状态（MVP）
 
-- 采集层为 mock 种子数据（无凭证供应商），**StepFun 插件已实现真实取数**（API Key 模式已验证）
-- 其余渠道插件（DeepSeek / BigModel / XiaomiMiMo / OpenCode）尚未实现
-- 凭证加密存储、Tauri 托盘客户端待建设计文档中的后续阶段
+- **9 家渠道插件已接入**：DeepSeek / BigModel 智谱 / StepFun / Xiaomi MiMo / OpenCode / Qoder / 通义 / 火山引擎 / Trae（各家凭证方式见详情页与上文「渠道插件」章节）
+- **桌面悬浮球客户端 v0.1**（Tauri 2 · Windows）已实现：白瓷球、置顶分组面板、设置抽屉、贴边收纳、开机自启
+- 无凭证不产数据：同步记 `not_configured`，界面呈空态，不用模拟值填充
+- 后续阶段：凭证加密存储、REST Bearer 鉴权、告警通知通道
