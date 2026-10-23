@@ -4,6 +4,12 @@
 各渠道**额度条、重置倒计时、续费日、余额**并可手动同步；双击球打开 Web 仪表盘。
 数据源就是本项目的 `GET /api/dashboard`，服务端唯一配套改动是 `server/middleware/cors.ts`。
 
+## 截图
+
+| 悬浮球 | 面板（置顶 + 全部渠道） | 设置抽屉 |
+|---|---|---|
+| ![悬浮球](../docs/screenshots/ball.png) | ![面板](../docs/screenshots/panel.png) | ![设置](../docs/screenshots/settings.png) |
+
 ## 目录
 
 ```
@@ -50,8 +56,13 @@ scripts\tauri-dev.bat  # 等价于 npm run tauri dev，但先加载 VS2019 vcvar
 
 ```bash
 cd desktop
-scripts\tauri-build.bat  # 产出 src-tauri/target/release/bundle/nsis/*.exe 与 msi/*.msi
+scripts\tauri-build.bat   # 完整打包：NSIS 安装包 + MSI + exe
+scripts\tauri-exe.bat     # 只出 prod exe（tauri build --no-bundle，不生成安装器）
 ```
+
+> **致命坑：绝不要裸 `cargo build --release`**——绕过 tauri CLI 会把二进制编成
+> **dev 模式**（启动去连 `devUrl` 1420 而不是内嵌 dist），vite 不在时窗口完全空白，
+> 看起来像「球消失/点击没反应」。出正式 exe 必须走上面两个脚本之一。
 
 图标源变更时：改根目录 `public/icon.svg` → `node scripts/gen-icon-source.mjs`
 （用根目录的 playwright）→ `npx tauri icon src-tauri/icons/icon-source.png`。
@@ -62,8 +73,15 @@ scripts\tauri-build.bat  # 产出 src-tauri/target/release/bundle/nsis/*.exe 与
   （位置存 localStorage，重启恢复并夹回屏幕内）。拖拽是 JS 驱动（`cursorPosition` +
   `setPosition` 跟随光标）——`data-tauri-drag-region` 的 WM_NCLBUTTONDOWN/HTCAPTION
   对无边框窗口不生效；按下期间的位置采样同时充当「拖拽≠点击」守卫。
-- **贴边磁吸**：拖拽时距显示器工作区边缘 28px 内自动吸上（完全贴边、支持四边与角落、
+- **贴边磁吸**：拖拽时距显示器工作区边缘 **12px** 内才自动吸上（完全贴边、支持四边与角落、
   跨屏跟随光标所在屏），拖拽全程夹紧在工作区内不许出屏。
+- **面板分组**：头部（仪表盘/同步/设置/关闭）+ 三格汇总条 +「**置顶**」组（用户自选最多
+  2 个供应商，行尾图钉切换，第 3 个挤掉最早置顶；置顶卡展示**全部额度窗口 + 余额 +
+  今日/同步脚注**）+「全部渠道」单行组（头像·名称·**余额**·最紧张百分比·紧凑倒计时·
+  图钉，按最紧张度降序）。置顶列表存 localStorage `atlas-pins`。
+- **弹出动画**：面板按「球在哪个方位」动态选 transform-origin 与进入方向
+  （球在上→从上方滑入带轻微回弹，球在下→从下方托起），收起沿原路缩回；
+  点球时球体同步做一次弹跳反馈（ball-pop）。
 - **边缘收纳**：停靠在边上的球，鼠标移开后 0.8s 自动滑出屏幕，留 34px 边条
   （≈ 球体月牙形凸起 18px，作为「球停在这」的可视提示；rAF 缓动 240ms）；
   鼠标碰到边条滑回屏内（260ms），再移开又收回。启动时若上次位置是贴边的，
@@ -73,11 +91,15 @@ scripts\tauri-build.bat  # 产出 src-tauri/target/release/bundle/nsis/*.exe 与
 - **面板动画**：展开 = 上浮淡入（220ms，锚点靠球一侧），收起 = 下沉淡出（150ms），
   播完才真正 hide 窗口；原生面板窗口 DOM 复用，用 openKey 重挂载卡片重放入场动画。
 - **面板**：失焦 130ms 后自动隐藏（点球瞬间会先撤销该隐藏，避免闪烁）；Esc / × 手动关。
+  顶部按钮行：`仪表盘 ↗`（开 Web 完整仪表盘）、刷新图标（=同步全部，带旋转态）、齿轮
+  （连接设置 + 开机自启开关）、×；底部无独立 footer，列表直通底边。
 - **托盘**：左键=切换单词板，右键菜单=打开仪表盘 / 立即同步 / 退出。
-- **数据**：60s 轮询；面板「同步全部」= `POST /api/sync`（服务端串行，可能十几秒），
+- **数据**：60s 轮询；面板头部刷新图标 = `POST /api/sync`（服务端串行，可能十几秒），
   完成后广播 `atlas-reload` 让两个窗口同时刷新；数据 >30 分钟没拉到 → 球上灰色过期角标；
   拉取失败 → 球变暗显示 `!`，面板显示「服务未连接」+ 重试。
-- **连接设置**：面板齿轮里改服务器地址（默认 `http://127.0.0.1:3000`），存 localStorage。
+- **连接设置**：面板齿轮里改服务器地址（默认 `http://127.0.0.1:3000`），存 localStorage；
+  齿轮展开区还有**开机自启**开关（`tauri-plugin-autostart`，写 `HKCU\...\Run` 键，
+  值指向当前 exe 路径——exe 移动/换安装路径后需重新开一次）。
 - **窗口几何**：Windows DefWindowProc 会把窗口钳到 `SM_CXMINTRACK`（本机 136px），
   小窗在创建期配置 minWidth 压不住——`main.rs` setup 里运行时
   `set_min_size` + `set_size` 修正（现为 104×104：球体 72 + 光晕余量）。
