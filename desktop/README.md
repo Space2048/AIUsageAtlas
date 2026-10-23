@@ -25,7 +25,7 @@ desktop/
 │   ├── src/main.rs         # Rust 只做窗口/托盘/单实例，业务全走前端事件
 │   ├── tauri.conf.json     # 双窗口 + NSIS/MSI 打包配置
 │   ├── capabilities/       # ACL 权限（拖拽/显隐/定位/事件/打开链接）
-│   └── icons/              # 由 public/icon.svg 派生（npx tauri icon）
+│   └── icons/              # 由 public/icon.svg 派生（npx tauri icon）；托盘用 32x32.png 编译期嵌入
 └── scripts/gen-icon-source.mjs
 ```
 
@@ -67,6 +67,11 @@ scripts\tauri-exe.bat     # 只出 prod exe（tauri build --no-bundle，不生�
 图标源变更时：改根目录 `public/icon.svg` → `node scripts/gen-icon-source.mjs`
 （用根目录的 playwright）→ `npx tauri icon src-tauri/icons/icon-source.png`。
 
+> 换图标后托盘/exe 图标没变不是错觉：托盘图标不走 `default_window_icon` 链路，而是
+> `main.rs` 编译期 `include_bytes!("../icons/32x32.png")` 直接嵌入；exe 的 PE 图标资源
+> 取 `bundle.icon` 首位（`icon.ico` 已提到首位）。两处都是为了绕开「磁盘图标文件已是
+> 新标、打出来仍是旧图」的多图标来源缓存漂移，改完必须重新编译才生效。
+
 ## 行为说明
 
 - **单击球**：展开/收起面板；**双击球**：收起面板并打开 Web 仪表盘；**拖拽球**：移动
@@ -93,7 +98,7 @@ scripts\tauri-exe.bat     # 只出 prod exe（tauri build --no-bundle，不生�
 - **面板**：失焦 130ms 后自动隐藏（点球瞬间会先撤销该隐藏，避免闪烁）；Esc / × 手动关。
   顶部按钮行：`仪表盘 ↗`（开 Web 完整仪表盘）、刷新图标（=同步全部，带旋转态）、齿轮
   （连接设置 + 开机自启开关）、×；底部无独立 footer，列表直通底边。
-- **托盘**：左键=切换单词板，右键菜单=打开仪表盘 / 立即同步 / 退出。
+- **托盘**：左键=切换面板显隐，右键菜单=打开仪表盘 / 立即同步 / 退出。
 - **数据**：60s 轮询；面板头部刷新图标 = `POST /api/sync`（服务端串行，可能十几秒），
   完成后广播 `atlas-reload` 让两个窗口同时刷新；数据 >30 分钟没拉到 → 球上灰色过期角标；
   拉取失败 → 球变暗显示 `!`，面板显示「服务未连接」+ 重试。

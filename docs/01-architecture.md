@@ -1,7 +1,9 @@
-# AIUsageAtlas — 架构设计与技术选型（草案 v0.1）
+# AIUsageAtlas — 架构设计与技术选型（v0.2）
 
-> 状态：待评审 · 2026-10-20
-> 定位：自托管的「AI 供应商额度/用量聚合器」。服务端单容器负责采集、存储、Web 管理；Win/Mac 托盘客户端只读展示并触发刷新。单用户、访问令牌鉴权，不做账户体系。
+> 状态：2026-10-23 校准 · MVP 已落地（9 渠道采集 + Windows 桌面悬浮球 v0.1）
+> 定位：自托管的「AI 供应商额度/用量聚合器」。服务端单容器负责采集、存储、Web 管理；桌面客户端只读展示并触发刷新。单用户、访问令牌鉴权，不做账户体系。
+>
+> **设计 vs 实现对照**：以下仍属设计目标未实现——WebSocket 推送同步进度（现为 60s 轮询 + 手动刷新）、凭证加密存储（现明文 JSON）、REST Bearer 鉴权中间件（`api_token` 表只存不验）、Mac 客户端（现仅 Windows）、告警通知通道、LiteLLM 价格快照自动刷新。
 
 ## 1. 总体架构
 
@@ -30,22 +32,26 @@
 
 ### 2.1 插件接口（每个渠道一个插件）
 
-认证方式声明在插件内部，同一插件可实现多种方式，运行时按可用性择优（API Key 直连 > Cookie 请求 > 内嵌浏览器登录捕获）：
+认证方式声明在插件内部，同一插件可实现多种方式，按用户所选凭证形态执行（API Key 直连 > Cookie 请求 > 浏览器登录会话；火山引擎另有第四种 `aksk` Access Key 签名）。以下与 `server/providers/types.ts` 的实际接口对齐：
 
 ```ts
 interface ProviderPlugin {
-  id: string                          // 'deepseek' | 'bigmodel' | 'stepfun' | 'xiaomimo' | 'opencode'
+  id: string                          // stepfun / xiaomimo / deepseek / bigmodel / opencode / tongyi / volcengine / trae / qoder
   displayName: string
-  authMethods: AuthKind[]             // 'apikey' | 'cookie' | 'browser-login'
-  login?(ctx: LoginCtx): Promise<Credential>
-  // browser-login: 打开内嵌 Playwright 引导用户登录，持久化 storageState 供后续复用
-  fetch(ctx: FetchCtx, cred: Credential): Promise<NormalizedSnapshot>
-  scheduleDefault: string             // interval（可被用户逐供应商覆盖）
-  priceTable?: LocalPrice[]           // 可选：LiteLLM 表缺失的国内模型自带价格
+  authMethods: AuthKind[]             // 'apikey' | 'cookie' | 'browser-login' | 'aksk'
+  scheduleDefaultSec: number          // 默认同步间隔秒数（可被用户逐供应商覆盖）
+  sites?: Site[]                      // 多站点渠道（Qoder 国内站 qoder.cn / 国际站），决定登录页与默认货币
+  login?(ctx: PluginContext): Promise<PluginLoginResult>
+  // browser-login：打开真实浏览器（本机 Chrome 优先）登录一次，storageState 持久化跨重启复用
+  preNavigate?(context, opts): Promise<void>
+  // 会话页加载前预处理：如 MiMo 先用长效 passToken 纯 HTTP 换发新 serviceToken，防过期快照触发全局登出
+  fetch(ctx: PluginContext, cred: CredentialPayload): Promise<PluginFetchResult>  // 归一化快照
 }
 ```
 
-新增渠道 = 新增一个 `plugins/<id>/` 目录，不改核心。
+插件还可以在 `fetch` 结果里带回 `modelPrices`（渠道自带官方价目，如通义 300+ 条），落 `model_price` 表 `source='official'` 只补缺不覆盖。
+
+新增渠道 = 在 `server/providers/<id>.ts` 实现插件并到 `server/providers/index.ts` 登记，不改核心。
 
 ### 2.2 归一化数据模型（能拿多细拿多细）
 
@@ -101,17 +107,21 @@ interface ProviderPlugin {
 - 手动刷新进入同一队列，同一供应商任务去重；WebSocket 推送进度
 - 采集优先级：能用 HTTP 直取接口绝不开浏览器
 
-## 3. MVP 渠道策略
+## 3. 渠道接入现状（9 渠道已上线）
 
-| 渠道 | 首选取数 | 说明 |
-|------|---------|------|
-| DeepSeek | API Key 直连 | 官方余额/充值接口 |
-| BigModel（智谱） | API Key 直连 + 控制台爬取 | 余额可直连；用量明细走爬取 |
-| StepFun | Cookie / 登录捕获 | 无公开用量 API，MVP 期实测控制台端点 |
-| XiaomiMimo | Cookie / 登录捕获 | 同上 |
-| OpenCode | API Key（Zen 按量）/ Cookie | 两种形态都可能出现，插件内分支 |
+| 渠道 | 凭证方式 | 取数路径 |
+|------|---------|---------|
+| DeepSeek | API Key + 浏览器登录 | Key 直连余额/模型列表；控制台会话补用量与费用（localStorage `userToken` → Bearer 头） |
+| BigModel（智谱） | API Key + 浏览器登录 | Key 直连 open.bigmodel.cn 的 `/api/monitor`、`/api/biz`、`/api/finance` 三个前缀全数据面，订阅与按日账单也走 Key（页内 fetch 必须带 Bearer 头，不认裸 Cookie） |
+| StepFun | API Key / Cookie / 浏览器登录 | Key 直连余额；控制台 Connect-RPC 双流（Step Plan 套餐 + Dev 按量），须带 `connect-protocol-version` 等头 |
+| Xiaomi MiMo | API Key / Cookie / 浏览器登录 | 控制台「套餐按天×模型」与「按量账单」两条独立流；会话加载前 passToken 预换发防全局登出 |
+| OpenCode | API Key + 浏览器登录 | 会话采集用量；`loadCredential('apikey')` 混合补 Go 配额/账单（`/console/api/*` 要 `x-org-id` 头） |
+| 通义（百炼） | API Key + 浏览器登录 | Key 直连模型列表与官方价目；余额/用量 Key 侧全 404，走阿里云会话页流量发现 |
+| 火山引擎（方舟） | AK/SK 签名（浏览器会话备选） | 方舟 OpenAPI `GetInferenceUsage`（HMAC-SHA1 签名，仅支持 Access Key）；按 BillingStatus 拆订阅/按量双平面 |
+| Trae | 仅浏览器登录 | 无任何 API Key 数据面；字节 WAF 只放行页面自身请求，用 `captureJsonResponses` 收会话 RPC 响应（积分制） |
+| Qoder | 仅浏览器登录 | 国内站 qoder.cn / 国际站双站点（插件 `sites` 声明）；会话 `/api/v1`、`/api/v2` 接口 + credits 用量三接口（credits 是消耗单位非 token） |
 
-价格换算：LiteLLM 定价 JSON 每日刷新缓存；国内模型缺失项由渠道插件自带价格表兜底。
+价格换算：设计目标是 LiteLLM 定价 JSON 每日快照（尚未接入）；当前实际来源 = `price-catalog.ts` 随代码维护的官方核价 + 插件自带价目（`source='official'` 只补缺）。
 
 ## 4. 技术选型
 

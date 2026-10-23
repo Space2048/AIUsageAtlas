@@ -1,6 +1,6 @@
 # 数据结构设计
 
-> 校准日期：2026-10-21，对应 `server/utils/db.ts` 的 15 张表与 `server/utils/sync-runner.ts` 的落库语义。
+> 校准日期：2026-10-23，对应 `server/utils/db.ts` 的 15 张表与 `server/utils/sync-runner.ts` 的落库语义。
 > 改表时这份文档要一起改：下面的字段和写入规则都是从代码逐条核对出来的。
 
 ## 1. 设计原则
@@ -158,14 +158,14 @@ flowchart LR
 
     SR --> PLUG["ProviderPlugin.fetch(ctx, cred)"]
 
-    subgraph PLUGS["server/providers/*.ts"]
-        P1["stepfun<br/>apikey · cookie · browser-login"]
-        P2["xiaomimo<br/>apikey · cookie · browser-login"]
-        P3["deepseek · bigmodel · opencode<br/>apikey"]
+    subgraph PLUGS["server/providers/*.ts · 9 渠道"]
+        P1["stepfun · xiaomimo<br/>apikey · cookie · browser-login"]
+        P2["deepseek · bigmodel · opencode · tongyi<br/>apikey · browser-login"]
+        P3["volcengine：aksk 签名 · browser-login<br/>trae · qoder：仅 browser-login"]
     end
 
     PLUG --> PLUGS
-    PLUGS -->|"控制台型：Playwright 常驻无头页面<br/>storageState 快照跨重启恢复"| BROWSER["browser-session.ts"]
+    PLUGS -->|"控制台型：Playwright 常驻无头页面<br/>storageState 跨重启恢复 · 加载前 preNavigate 预处理<br/>（MiMo passToken 预换发、Trae captureJsonResponses 绕 WAF）"| BROWSER["browser-session.ts"]
 
     PLUGS -->|"PluginFetchResult<br/>account / plan / balance / windows<br/>usageDaily / modelUsage / availableModels"| NORM["applyResult() 归一化落库"]
 
@@ -230,4 +230,4 @@ flowchart LR
 | `credential.payload_enc` 明文 | 列名叫 `_enc` 但当前存的是明文 JSON（API Key / Cookie）。表已按加密预留，实现待补 |
 | `reset_at` 格式混用 | 插件给 ISO 串，历史行可能是 SQLite `datetime` 格式；读取侧靠 `new Date()` 兜住 |
 | `usage_daily.billing` / `usage_model_daily.billing` | 由 `ALTER TABLE` 补列，不在 `migrate()` 的建表语句里，新库老库同构但读代码时容易漏看 |
-| 价格表无自动刷新 | `model_price` 目前只有 `price-catalog.ts` 随代码维护的官方价目；调价需要人工加新的 `effective_from` 版本 |
+| 价格表无自动刷新 | `model_price` 来源 = `price-catalog.ts` 随代码维护的官方核价（MiMo）+ 插件自带价目（通义等，`source='official'` 只补缺不覆盖）；LiteLLM 快照与自动调价检测待接入，调价需人工加新 `effective_from` 版本 |
